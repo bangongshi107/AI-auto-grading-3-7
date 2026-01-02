@@ -488,9 +488,6 @@ QScrollBar::sub-line:horizontal {
             <property name="text">
              <string>测试api连接</string>
             </property>
-            <property name="shortcut">
-             <string>Esc</string>
-            </property>
            </widget>
           </item>
          </layout>
@@ -1524,10 +1521,7 @@ QScrollBar::sub-line:horizontal {
           <item>
            <widget class="QPushButton" name="stop_but">
             <property name="text">
-             <string>中止(Esc)</string>
-            </property>
-            <property name="shortcut">
-             <string>Esc</string>
+             <string>中止</string>
             </property>
            </widget>
           </item>

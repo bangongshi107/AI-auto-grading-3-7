@@ -4,7 +4,6 @@ import datetime
 import pathlib
 import warnings
 import ctypes
-import threading
 from ctypes import wintypes
 from typing import Callable
 
@@ -56,7 +55,7 @@ if sys.platform == 'win32':
         pass  # 如果设置失败，继续使用默认编码
 
 from PyQt5.QtWidgets import QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QAbstractNativeEventFilter
 from PyQt5.QtGui import QFont
 from ui_components.main_window import MainWindow
 from api_service import ApiService
@@ -67,127 +66,34 @@ import traceback
 import pandas as pd
 import time
 
-# 可选：用于“全局监听 Esc（不拦截按键）”以便最小化/切到其它窗口时也能中止阅卷。
-# 若环境未安装 pynput，则会自动降级为仅支持窗口内快捷键（原行为）。
-try:
-    from pynput import keyboard as _pynput_keyboard  # type: ignore
-except Exception:
-    _pynput_keyboard = None
-
-# 可选：用于“全局拦截并吞掉 Esc（仅在阅卷进行中启用）”，确保 Esc 只对本程序生效。
-# 依赖第三方库 keyboard；未安装则会降级为不吞键的监听模式。
-try:
-    import keyboard as _keyboard  # type: ignore
-except Exception:
-    _keyboard = None
+### Esc 方案已弃用（用户决定放弃） ###
 
 
-class _WindowsExclusiveEscHook:
-    """Windows 低级键盘钩子：在启用时吞掉 Esc，并回调停止。
+class _WindowsHotkeyEventFilter(QAbstractNativeEventFilter):
+    """监听 Windows 的 WM_HOTKEY 消息（用于全局组合键，不需要新依赖）。"""
 
-    目标：不引入新依赖；仅在“阅卷进行中”独占 Esc。
-    注意：这是全局键盘钩子，可能被安全软件关注；已尽量降低副作用：
-    - 默认禁用，仅在 worker 运行期间启用
-    - 只处理 VK_ESCAPE
-    """
+    WM_HOTKEY = 0x0312
 
-    _WH_KEYBOARD_LL = 13
-    _WM_KEYDOWN = 0x0100
-    _WM_SYSKEYDOWN = 0x0104
-    _VK_ESCAPE = 0x1B
-    _HC_ACTION = 0
-    _WM_QUIT = 0x0012
+    def __init__(self, hotkey_id: int, on_hotkey: Callable[[], None]):
+        super().__init__()
+        self._hotkey_id = int(hotkey_id)
+        self._on_hotkey = on_hotkey
 
-    class _KBDLLHOOKSTRUCT(ctypes.Structure):
-        _fields_ = [
-            ("vkCode", ctypes.c_uint32),
-            ("scanCode", ctypes.c_uint32),
-            ("flags", ctypes.c_uint32),
-            ("time", ctypes.c_uint32),
-            ("dwExtraInfo", ctypes.c_void_p),
-        ]
-
-    def __init__(self, should_swallow: Callable[[], bool], on_esc: Callable[[], None]):
-        self._should_swallow = should_swallow
-        self._on_esc = on_esc
-
-        self._enabled = False
-        self._lock = threading.Lock()
-        self._last_hit_ts = 0.0
-
-        self._hook_handle = None
-        self._thread = None
-        self._thread_id = 0
-        self._proc_ref = None
-
-    def set_enabled(self, enabled: bool) -> None:
-        with self._lock:
-            self._enabled = bool(enabled)
-
-    def start(self) -> bool:
-        if sys.platform != 'win32':
-            return False
-        if self._thread is not None:
-            return True
-
-        def _thread_main() -> None:
-            try:
-                user32 = ctypes.windll.user32
-                kernel32 = ctypes.windll.kernel32
-
-                LRESULT = ctypes.c_longlong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_long
-                LowLevelProcType = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
-
-                def _hook_proc(nCode, wParam, lParam):
-                    try:
-                        if nCode == self._HC_ACTION and wParam in (self._WM_KEYDOWN, self._WM_SYSKEYDOWN):
-                            kb = ctypes.cast(lParam, ctypes.POINTER(self._KBDLLHOOKSTRUCT)).contents
-                            if kb.vkCode == self._VK_ESCAPE:
-                                with self._lock:
-                                    enabled = self._enabled
-                                if enabled and bool(self._should_swallow()):
-                                    # 限流：避免长按重复触发
-                                    now = time.time()
-                                    if now - float(self._last_hit_ts) >= 0.25:
-                                        self._last_hit_ts = now
-                                        self._on_esc()
-                                    return 1  # 吞掉 Esc
-                        return user32.CallNextHookEx(self._hook_handle, nCode, wParam, lParam)
-                    except Exception:
-                        return user32.CallNextHookEx(self._hook_handle, nCode, wParam, lParam)
-
-                self._proc_ref = LowLevelProcType(_hook_proc)
-                self._thread_id = kernel32.GetCurrentThreadId()
-                h_mod = kernel32.GetModuleHandleW(None)
-                self._hook_handle = user32.SetWindowsHookExW(self._WH_KEYBOARD_LL, self._proc_ref, h_mod, 0)
-                if not self._hook_handle:
-                    return
-
-                msg = wintypes.MSG()
-                while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
-                    user32.TranslateMessage(ctypes.byref(msg))
-                    user32.DispatchMessageW(ctypes.byref(msg))
-            finally:
+    def nativeEventFilter(self, eventType, message):
+        # PyQt5 on Windows typically reports eventType as 'windows_generic_MSG'
+        if eventType not in ("windows_generic_MSG", "windows_dispatcher_MSG"):
+            return False, 0
+        try:
+            msg = wintypes.MSG.from_address(int(message))
+            if msg.message == self.WM_HOTKEY and int(msg.wParam) == self._hotkey_id:
                 try:
-                    if self._hook_handle:
-                        ctypes.windll.user32.UnhookWindowsHookEx(self._hook_handle)
+                    self._on_hotkey()
                 except Exception:
                     pass
-                self._hook_handle = None
-
-        t = threading.Thread(target=_thread_main, name="ExclusiveEscHook", daemon=True)
-        t.start()
-        self._thread = t
-        return True
-
-    def stop(self) -> None:
-        if sys.platform != 'win32':
-            return
-        try:
-            if self._thread_id:
-                ctypes.windll.user32.PostThreadMessageW(self._thread_id, self._WM_QUIT, 0, 0)
+                return True, 0
         except Exception:
             pass
+        return False, 0
 
 
 class SimpleNotificationDialog(QDialog):
@@ -417,25 +323,16 @@ class Application:
         # 为避免紧接着再弹“阅卷中断”导致重复提示，做一个短时间的屏蔽窗口。
         self._suppress_error_dialog_until = 0.0
 
-        # 全局 Esc 监听器（不拦截键盘输入）：仅在“正在阅卷”时响应，用于减少副作用。
-        self._global_esc_listener = None
-        self._global_esc_last_hit_ts = 0.0
-
-        # “独占 Esc（吞键）”热键句柄：只在阅卷中启用，停止后立即解除。
-        self._exclusive_esc_hotkey_id = None
-
-        # 纯内置实现（ctypes）独占 Esc：不需要任何新依赖
-        self._win_exclusive_esc = _WindowsExclusiveEscHook(
-            should_swallow=lambda: bool(getattr(self, 'worker', None) and self.worker.isRunning()),
-            on_esc=lambda: QTimer.singleShot(0, self.main_window.stop_auto_thread),
-        )
+        # 全局停止快捷键（Esc 已弃用）：使用 Ctrl+Alt+Shift+Z 作为“停止阅卷”热键。
+        self._stop_hotkey_id = 0xA17  # 任意固定ID即可（进程内唯一）
+        self._stop_hotkey_filter = None
 
 
 
         self._setup_application()
 
-        # 在应用就绪后启动全局 Esc 支持：优先“吞键独占（仅阅卷中启用）”，不可用则降级为“监听不吞键”。
-        self._setup_global_esc_support()
+        # 在应用就绪后注册全局热键（不依赖焦点）
+        self._setup_global_stop_hotkey()
 
     def _simplify_for_teacher(self, text: str) -> str:
         """把底层错误压缩成老师能看懂的一句话 + 建议。"""
@@ -527,205 +424,49 @@ class Application:
             print(f"应用程序初始化失败: {str(e)}")
             sys.exit(1)
 
-    def _setup_global_esc_support(self) -> None:
-        """配置 Esc 中止：优先“吞键独占（仅阅卷中启用）”。
+    def _setup_global_stop_hotkey(self) -> None:
+        """注册全局停止热键：Ctrl+Alt+Shift+Z。
 
-        1) 首选：ctypes + Windows 低级键盘钩子（无需新依赖，且可吞键）
-        2) 退化：keyboard 库（若用户已安装）
-        3) 再退化：pynput 监听（不吞键）
+        - 不依赖窗口焦点（最小化/切到其它软件也能触发）
+        - 不再使用 Esc（用户已放弃 Esc 方案）
+        - 不引入新依赖：使用 RegisterHotKey + Qt 原生事件过滤
         """
         if sys.platform != 'win32':
             return
 
-        # 退出时清理（无论使用哪种实现）
-        try:
-            self.app.aboutToQuit.connect(self._disable_exclusive_esc)
-        except Exception:
-            pass
-        try:
-            self.app.aboutToQuit.connect(self._stop_global_esc_listener)
-        except Exception:
-            pass
+        user32 = ctypes.windll.user32
+        MOD_ALT = 0x0001
+        MOD_CONTROL = 0x0002
+        MOD_SHIFT = 0x0004
 
-        # 退出时停止 ctypes hook
         try:
-            self.app.aboutToQuit.connect(self._stop_windows_exclusive_esc)
-        except Exception:
-            pass
+            # 注册 Ctrl+Alt+Shift+Z
+            ok = user32.RegisterHotKey(None, int(self._stop_hotkey_id), MOD_CONTROL | MOD_ALT | MOD_SHIFT, ord('Z'))
+            if not ok:
+                return
 
-        # 优先启用“纯内置”独占 Esc 钩子（默认禁用，阅卷开始时才启用吞键）
-        try:
-            if self._win_exclusive_esc.start():
+            def _on_hotkey() -> None:
                 try:
-                    if hasattr(self, 'main_window') and hasattr(self.main_window, 'log_message'):
-                        self.main_window.log_message(
-                            "已启用独占 Esc（内置实现）：阅卷进行中按 Esc 会停止，且不会传给其它程序。",
-                            True,
-                            "INFO",
-                        )
+                    if getattr(self, 'worker', None) is not None and self.worker.isRunning():
+                        QTimer.singleShot(0, self.main_window.stop_auto_thread)
                 except Exception:
                     pass
-                return
-        except Exception as e:
-            print(f"[WARN] 启动内置独占 Esc 失败: {e}")
 
-        if _keyboard is not None:
-            # 独占吞键模式：只在阅卷线程启动时才注册热键；此处只做提示。
+            self._stop_hotkey_filter = _WindowsHotkeyEventFilter(self._stop_hotkey_id, _on_hotkey)
+            self.app.installNativeEventFilter(self._stop_hotkey_filter)
+
             try:
-                if hasattr(self, 'main_window') and hasattr(self.main_window, 'log_message'):
-                    self.main_window.log_message(
-                        "已启用独占 Esc 中止：阅卷进行中按 Esc 会停止，且不会传给其它程序。",
-                        True,
-                        "INFO",
-                    )
+                self.app.aboutToQuit.connect(self._unregister_global_stop_hotkey)
             except Exception:
                 pass
+        except Exception:
             return
 
-        # 降级：仅监听不吞键
-        self._setup_global_esc_to_stop_if_running()
-
-    def _stop_windows_exclusive_esc(self) -> None:
-        try:
-            if getattr(self, '_win_exclusive_esc', None) is not None:
-                self._win_exclusive_esc.stop()
-        except Exception:
-            pass
-
-    def _enable_exclusive_esc_if_possible(self) -> None:
-        """仅在阅卷开始时启用“吞键独占 Esc”。"""
+    def _unregister_global_stop_hotkey(self) -> None:
         if sys.platform != 'win32':
             return
-
-        # 优先：内置 hook
         try:
-            if getattr(self, '_win_exclusive_esc', None) is not None:
-                self._win_exclusive_esc.set_enabled(True)
-                return
-        except Exception:
-            pass
-
-        # 退化：keyboard 库
-        if _keyboard is None:
-            return
-        if self._exclusive_esc_hotkey_id is not None:
-            return
-
-        def _on_esc() -> None:
-            try:
-                # 先解除吞键，尽快恢复系统默认行为（减少副作用）
-                self._disable_exclusive_esc()
-                QTimer.singleShot(0, self.main_window.stop_auto_thread)
-            except Exception:
-                pass
-
-        try:
-            # suppress=True: 吞掉 Esc，让 Esc 不再传递给其它程序
-            self._exclusive_esc_hotkey_id = _keyboard.add_hotkey(
-                'esc',
-                _on_esc,
-                suppress=True,
-                trigger_on_release=False,
-            )
-        except Exception as e:
-            print(f"[WARN] 启用独占 Esc 失败: {e}")
-            self._exclusive_esc_hotkey_id = None
-
-    def _disable_exclusive_esc(self) -> None:
-        """阅卷结束/停止后解除“吞键独占 Esc”。"""
-        # 先关内置 hook 的吞键开关
-        try:
-            if getattr(self, '_win_exclusive_esc', None) is not None:
-                self._win_exclusive_esc.set_enabled(False)
-        except Exception:
-            pass
-
-        # 再处理 keyboard 库（如果用到了）
-        if _keyboard is None:
-            return
-        try:
-            hid = self._exclusive_esc_hotkey_id
-            if hid is not None:
-                _keyboard.remove_hotkey(hid)
-        except Exception:
-            pass
-        finally:
-            self._exclusive_esc_hotkey_id = None
-
-    def _setup_global_esc_to_stop_if_running(self) -> None:
-        """全局监听 Esc，在阅卷中时中止（尽量减少副作用）。
-
-        设计目标：
-        - 不拦截/不吞掉 Esc（不影响其它软件正常接收 Esc）
-        - 仅当 worker 正在运行时才触发停止
-        - 通过 Qt 主线程安全调用 stop_auto_thread
-        """
-        if sys.platform != 'win32':
-            return
-
-        if _pynput_keyboard is None:
-            # 不强制依赖；保持原有 UI 内快捷键可用。
-            try:
-                if hasattr(self, 'main_window') and hasattr(self.main_window, 'log_message'):
-                    self.main_window.log_message(
-                        "提示：未安装 keyboard/pynput，无法在切到其它窗口时用 Esc 中止；仍可点击“中止”按钮。",
-                        True,
-                        "INFO",
-                    )
-            except Exception:
-                pass
-            return
-
-        kb = _pynput_keyboard
-
-        def _on_press(key) -> None:
-            try:
-                if key != kb.Key.esc:
-                    return
-
-                # 限流：避免长按 Esc 或系统重复触发导致多次 stop
-                now = time.time()
-                if now - float(getattr(self, '_global_esc_last_hit_ts', 0.0)) < 0.35:
-                    return
-                self._global_esc_last_hit_ts = now
-
-                # 只有阅卷线程运行时才响应，减少误触副作用
-                if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
-                    # 跨线程：必须切回 Qt 主线程调用 UI/线程控制
-                    QTimer.singleShot(0, self.main_window.stop_auto_thread)
-            except Exception:
-                # 全局监听器里不要抛异常，避免监听线程退出
-                pass
-
-        try:
-            listener = kb.Listener(on_press=_on_press)
-            listener.daemon = True
-            listener.start()
-            self._global_esc_listener = listener
-
-            # 退出时尝试停止监听，避免后台线程残留
-            try:
-                self.app.aboutToQuit.connect(self._stop_global_esc_listener)
-            except Exception:
-                pass
-
-            try:
-                if hasattr(self, 'main_window') and hasattr(self.main_window, 'log_message'):
-                    self.main_window.log_message(
-                        "已启用全局 Esc 中止（降级模式）：阅卷中按 Esc 可停止，但 Esc 仍会传给其它程序。",
-                        True,
-                        "INFO",
-                    )
-            except Exception:
-                pass
-        except Exception as e:
-            # 启动失败则静默降级
-            print(f"[WARN] 启动全局 Esc 监听失败: {e}")
-
-    def _stop_global_esc_listener(self) -> None:
-        try:
-            if self._global_esc_listener is not None:
-                self._global_esc_listener.stop()
+            ctypes.windll.user32.UnregisterHotKey(None, int(self._stop_hotkey_id))
         except Exception:
             pass
 
@@ -747,16 +488,6 @@ class Application:
         """连接工作线程信号"""
         try:
             self.signal_manager.disconnect_all() # 断开旧连接
-
-            # 线程启动/结束：控制“独占 Esc（吞键）”是否启用（仅阅卷期间生效）
-            try:
-                self.worker.started.connect(self._enable_exclusive_esc_if_possible)
-            except Exception:
-                pass
-            try:
-                self.worker.finished_signal.connect(self._disable_exclusive_esc)
-            except Exception:
-                pass
             self.signal_manager.connect(
                 self.worker.log_signal,
                 self.main_window.log_message
@@ -778,10 +509,6 @@ class Application:
                     self.worker.error_signal,
                     self.show_error_notification # 这个方法内部需要调用 main_window.on_worker_error
                 )
-                try:
-                    self.signal_manager.connect(self.worker.error_signal, lambda *_args: self._disable_exclusive_esc())
-                except Exception:
-                    pass
 
             # 双评分差超过阈值中断
             if hasattr(self.worker, 'threshold_exceeded_signal'):
@@ -789,10 +516,6 @@ class Application:
                     self.worker.threshold_exceeded_signal,
                     self.show_threshold_exceeded_notification # 这个方法内部需要调用 main_window.on_worker_error
                 )
-                try:
-                    self.signal_manager.connect(self.worker.threshold_exceeded_signal, lambda *_args: self._disable_exclusive_esc())
-                except Exception:
-                    pass
 
             # 人工介入信号：当AI明确请求人工复核时触发
             if hasattr(self.worker, 'manual_intervention_signal'):
@@ -800,10 +523,6 @@ class Application:
                     self.worker.manual_intervention_signal,
                     self.show_manual_intervention_notification
                 )
-                try:
-                    self.signal_manager.connect(self.worker.manual_intervention_signal, lambda *_args: self._disable_exclusive_esc())
-                except Exception:
-                    pass
 
 
 
@@ -815,7 +534,6 @@ class Application:
 
     def show_completion_notification(self):
         """显示任务完成通知"""
-        self._disable_exclusive_esc()
         # 先调用原有的完成处理
         self.main_window.on_worker_finished()
 
@@ -836,7 +554,6 @@ class Application:
 
     def show_error_notification(self, error_message):
         """显示错误通知并恢复主窗口状态"""
-        self._disable_exclusive_esc()
         # 若刚刚触发了“人工介入”弹窗，则不再重复弹“阅卷中断”
         try:
             if time.time() < float(getattr(self, '_suppress_error_dialog_until', 0.0)):
@@ -901,7 +618,6 @@ class Application:
 
     def show_threshold_exceeded_notification(self, reason):
         """显示双评分差超过阈值的通知并恢复主窗口状态"""
-        self._disable_exclusive_esc()
         if hasattr(self.main_window, 'on_worker_error'):
             self.main_window.on_worker_error(reason)
         else:
@@ -929,7 +645,6 @@ class Application:
 
     def show_manual_intervention_notification(self, message, raw_feedback):
         """当工作线程请求人工介入时调用，展示更明显的模态对话框并播放提示音。"""
-        self._disable_exclusive_esc()
         # 标记：接下来短时间内如果收到 error_signal，不再重复弹“阅卷中断”
         try:
             self._suppress_error_dialog_until = time.time() + 2.0

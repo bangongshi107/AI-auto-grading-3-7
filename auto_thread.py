@@ -952,11 +952,12 @@ class GradingThread(QThread):
         if not student_answer_summary:
             return False
 
-        # 检查摘要是否包含无法识别的关键词
+        # 检查摘要是否包含“图片质量/识别能力不足”的关键词。
+        # 注意：不要把“未作答/空白作答”当成无法识别（空白应当允许直接判0分）。
         unrecognizable_keywords = [
-            "无法", "无法识别", "字迹模糊", "无法辨认", "完全空白",
-            "图片内容完全无法识别", "字迹完全无法辨认", "未作答",
-            "学生未作答", "答题区域空白", "无任何作答痕迹"
+            "无法识别", "字迹模糊", "无法辨认",
+            "图片内容完全无法识别", "字迹完全无法辨认",
+            "图片不清晰", "看不清", "看不清楚",
         ]
 
         summary_lower = student_answer_summary.lower()
@@ -972,6 +973,81 @@ class GradingThread(QThread):
                 return True
 
         return False
+
+    def _get_grading_policy(self, field_name: str, default_value: str) -> str:
+        """从ConfigManager读取阅卷判定策略。"""
+        try:
+            cm = getattr(self.api_service, 'config_manager', None)
+            if cm is None:
+                return default_value
+            v = getattr(cm, field_name, default_value)
+            v = str(v).strip().lower() if v is not None else default_value
+            if v not in {"zero", "manual", "anomaly"}:
+                return default_value
+            return v
+        except Exception:
+            return default_value
+
+    def _detect_blank_answer_feedback(self, student_answer_summary: str, scoring_basis: str) -> Optional[str]:
+        """检测空白/未作答（应当允许直接判0分，不应自动升级为异常卷）。"""
+        if not student_answer_summary and not scoring_basis:
+            return None
+
+        combined = " ".join([str(student_answer_summary or ""), str(scoring_basis or "")]).strip()
+        s = combined.lower()
+
+        # 明确的“图片为空/图像为空”等属于配置或截图问题，仍应走异常卷/人工，不当作空白作答
+        severe_image_empty = [
+            "图片为空", "图像为空", "空白图片", "空白图像", "图像空白", "图片空白",
+        ]
+        if any(k in combined for k in severe_image_empty):
+            return None
+
+        blank_patterns = [
+            r'空白(?:试卷|卷|答卷)?', r'未作答', r'无作答', r'无答案',
+            r'无内容', r'内容为空', r'无有效内容',
+            r'no\s*(?:answer|content|response)', r'blank\s*(?:answer|response)',
+        ]
+
+        for p in blank_patterns:
+            try:
+                if re.search(p, s):
+                    m = re.search(p, s)
+                    return m.group(0) if m is not None else p
+            except re.error:
+                continue
+
+        return None
+
+    def _detect_gibberish_or_doodle_feedback(self, student_answer_summary: str, scoring_basis: str) -> Optional[str]:
+        """检测乱码/涂画/乱写等（可配置为0分或人工）。"""
+        if not student_answer_summary and not scoring_basis:
+            return None
+
+        combined = " ".join([str(student_answer_summary or ""), str(scoring_basis or "")]).strip()
+        s = combined.lower()
+
+        patterns = [
+            r'乱码', r'噪声太大', r'识别失败', r'识别错误', r'无法识别',
+            r'涂鸦', r'涂画', r'画图', r'乱写', r'胡写', r'乱七八糟',
+            r'unclear', r'cannot\s*(?:read|recognize)',
+        ]
+
+        for p in patterns:
+            try:
+                if re.search(p, s):
+                    m = re.search(p, s)
+                    return m.group(0) if m is not None else p
+            except re.error:
+                continue
+
+        return None
+
+    def _build_zero_scoring_basis(self, reason: str) -> str:
+        reason = (reason or "").strip()
+        reason = reason.replace("异常试卷", "").replace("异常卷", "").strip()
+        reason_text = reason if reason else "空白/无有效作答"
+        return f"判定：学生作答无有效内容（{reason_text}），本题按评分细则判0分。证据:【未检测到可评分的有效作答】"
 
     def _is_ai_requesting_image_content(self, student_answer_summary, scoring_basis):
         """
@@ -2192,6 +2268,38 @@ class GradingThread(QThread):
                 # 返回带有标记的结构，便于上层立即停止且不重试；raw_feedback 同样使用 display_text
                 return False, {'manual_intervention': True, 'message': manual_msg, 'raw_feedback': display_text}
 
+            # 【空白/无有效作答】默认应当直接判0分（不当作异常卷）
+            blank_msg = self._detect_blank_answer_feedback(student_answer_summary, scoring_basis)
+            if blank_msg:
+                blank_policy = self._get_grading_policy('blank_answer_policy', 'zero')
+                if blank_policy == 'zero':
+                    # 强制全0，避免模型误给分
+                    if isinstance(itemized_scores_from_json, list) and itemized_scores_from_json:
+                        itemized_scores_from_json = [0 for _ in itemized_scores_from_json]
+                    student_answer_summary = student_answer_summary if student_answer_summary else '空白作答'
+                    scoring_basis = self._build_zero_scoring_basis(blank_msg)
+                elif blank_policy == 'manual':
+                    display_text = student_answer_summary if student_answer_summary else ""
+                    self.manual_intervention_signal.emit(f"空白/无有效作答({blank_msg})需要人工处理", display_text)
+                    return False, {'manual_intervention': True, 'message': f'空白/无有效作答: {blank_msg}', 'raw_feedback': display_text}
+                else:  # anomaly
+                    display_text = student_answer_summary if student_answer_summary else ""
+                    return False, {'anomaly_paper': True, 'message': f'空白/无有效作答: {blank_msg}', 'raw_feedback': display_text}
+
+            # 【乱码/涂画/无法识别有效文字】按策略处理（默认人工）
+            gibberish_msg = self._detect_gibberish_or_doodle_feedback(student_answer_summary, scoring_basis)
+            if gibberish_msg:
+                gibberish_policy = self._get_grading_policy('gibberish_answer_policy', 'manual')
+                if gibberish_policy == 'zero':
+                    if isinstance(itemized_scores_from_json, list) and itemized_scores_from_json:
+                        itemized_scores_from_json = [0 for _ in itemized_scores_from_json]
+                    student_answer_summary = student_answer_summary if student_answer_summary else '疑似涂画/乱码作答'
+                    scoring_basis = self._build_zero_scoring_basis(gibberish_msg)
+                elif gibberish_policy == 'anomaly':
+                    display_text = student_answer_summary if student_answer_summary else ""
+                    return False, {'anomaly_paper': True, 'message': f'疑似涂画/乱码: {gibberish_msg}', 'raw_feedback': display_text}
+                # manual: 维持默认流程（后续可能由无法识别/请求图片等逻辑中止）
+
             # 【异常试卷检测】检测AI回复中是否包含"异常试卷"等关键词
             anomaly_msg = self._detect_anomaly_paper_feedback(student_answer_summary, scoring_basis)
             if anomaly_msg:
@@ -2365,20 +2473,33 @@ class GradingThread(QThread):
         combined = " ".join([str(student_answer_summary or ""), str(scoring_basis or "")])
         s = combined.lower()
 
-        # 使用正则与同义词映射进行鲁棒检测（后处理层主判断）
-        patterns = [
-            r'需(?:要)?人工介入', r'人工介入', r'需(?:要)?人工复核', r'人工复核',
-            r'无法(?:判定|评判|判断|评分|识别)', r'识别失败', r'识别错误', r'乱码', r'噪声太大',
-            r'\bmanual intervention\b', r'\bneed manual\b', r'\bcannot (?:judge|score)\b', r'\bunclear\b', r'\brequires manual\b'
-        ]
+        gibberish_policy = self._get_grading_policy('gibberish_answer_policy', 'manual')
 
-        for p in patterns:
+        always_manual_patterns = [
+            r'需(?:要)?人工介入', r'人工介入', r'需(?:要)?人工复核', r'人工复核',
+            r'无法(?:判定|评判|判断|评分)',
+            r'\bmanual intervention\b', r'\bneed manual\b', r'\bcannot (?:judge|score)\b', r'\brequires manual\b'
+        ]
+        for p in always_manual_patterns:
             try:
                 if re.search(p, s):
                     m = re.search(p, s)
                     return m.group(0) if m is not None else p
             except re.error:
                 continue
+
+        # 识别失败/乱码等：默认人工，但允许用户配置为0分
+        if gibberish_policy != 'zero':
+            soft_patterns = [
+                r'无法识别', r'识别失败', r'识别错误', r'乱码', r'噪声太大', r'\bunclear\b'
+            ]
+            for p in soft_patterns:
+                try:
+                    if re.search(p, s):
+                        m = re.search(p, s)
+                        return m.group(0) if m is not None else p
+                except re.error:
+                    continue
 
         return None
 
@@ -2387,7 +2508,8 @@ class GradingThread(QThread):
         检测AI返回的摘要或评分依据中是否包含指示"异常试卷"的信号。
         返回匹配到的简短消息（str）或None表示未检测到。
         
-        异常试卷关键词包括：异常试卷、空白试卷、无作答、缺考等。
+        异常试卷关键词包括：异常试卷、缺考、无效试卷、图片为空等。
+        注意：空白/未作答/无有效作答默认应判0分而非异常卷（可通过配置切换）。
         """
         if not student_answer_summary and not scoring_basis:
             return None
@@ -2397,13 +2519,11 @@ class GradingThread(QThread):
 
         # 异常试卷相关的检测模式
         anomaly_patterns = [
-            r'异常试卷', r'异常卷', r'空白试卷', r'空白卷', r'空白答卷',
-            r'无作答', r'未作答', r'无答案', r'无内容', r'内容为空',
+            r'异常试卷', r'异常卷',
             r'缺考', r'缺席', r'弃考', r'无效试卷', r'无效答卷',
             r'图像为空', r'图片为空', r'空白图像', r'空白图片',
-            r'无法评分', r'无法打分', r'无有效内容',
-            r'blank\s*(?:paper|answer|sheet)', r'empty\s*(?:paper|answer|sheet)',
-            r'no\s*(?:answer|content|response)', r'absent', r'missing\s*answer'
+            r'blank\s*(?:paper|sheet)', r'empty\s*(?:paper|sheet)',
+            r'absent', r'missing\s*answer'
         ]
 
         for p in anomaly_patterns:

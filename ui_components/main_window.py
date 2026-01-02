@@ -49,8 +49,6 @@ class MainWindow(QMainWindow):
         self.answer_windows = {}
         self.current_question = 1
         self.max_questions = 7  # 多题模式最多支持7道题
-        self.shortcut_esc = QShortcut(QKeySequence("Escape"), self)
-        self.shortcut_esc.activated.connect(self.stop_auto_thread)
         self._ui_cache = {}
 
         self.init_ui()
@@ -177,6 +175,21 @@ class MainWindow(QMainWindow):
         simplified = cleaned
         for k, v in replacements.items():
             simplified = re.sub(k, v, simplified, flags=re.IGNORECASE)
+
+        # ==================================================================
+        # 成功场景：连接测试通过
+        # 说明：test_api_connection() 成功时会返回类似“火山引擎 (推荐)：连接成功”。
+        # 这里要直接按成功展示，避免被默认分支包装成“操作未成功：...”。
+        # ==================================================================
+        success_markers = [
+            "连接成功",
+            "测试通过",
+            "可正常使用",
+        ]
+        if any(m in simplified for m in success_markers) or any(m in cleaned_for_parse for m in success_markers):
+            # 保留平台名等信息；只做最基础的去噪
+            ok_text = (simplified or cleaned).strip()
+            return ok_text, detail
 
         # JSON/响应格式问题：通常是模型输出不符合要求（不要提示“检查密钥”）
         if any(k in low for k in ["json解析", "json parse", "响应格式", "api响应格式异常", "format" ]):
@@ -1305,6 +1318,7 @@ class MainWindow(QMainWindow):
         
         stop_btn = self.get_ui_element('stop_but')
         if stop_btn and isinstance(stop_btn, QPushButton):
+            stop_btn.setToolTip("中止快捷键 Ctrl+Alt+Shift+Z")
             stop_btn.clicked.connect(self.stop_auto_thread)
         
         test_btn = self.get_ui_element('api_test_button')

@@ -63,6 +63,14 @@ class ConfigManager:
         self.wait_time = 1.5  # 等待时间（支持小数，默认1.5秒）
         self.api_reset_interval = 30  # API重置间隔（默认30秒）
         self.score_rounding_step = 0.5  # 分数步长（默认0.5）
+
+        # 阅卷判定策略（空白/乱码等如何处理）
+        # 可选值：
+        # - zero: 直接判0分并继续（不算异常卷/不触发人工介入）
+        # - manual: 停止并提示人工介入
+        # - anomaly: 走“异常试卷”流程（如启用异常卷按钮则自动点击跳过，否则人工介入）
+        self.blank_answer_policy = "zero"
+        self.gibberish_answer_policy = "manual"
         
         self.question_configs = {}
         for i in range(1, self.max_questions + 1):
@@ -135,6 +143,10 @@ class ConfigManager:
         self.wait_time = float(self._get_config_safe('Auto', 'wait_time', '1.5'))
         self.api_reset_interval = self._get_config_safe('Auto', 'api_reset_interval', 30, int)
         self.score_rounding_step = float(self._get_config_safe('Settings', 'score_rounding_step', '0.5'))
+
+        # 阅卷判定策略
+        self.blank_answer_policy = self._get_config_safe('GradingPolicy', 'blank_answer_policy', 'zero', str)
+        self.gibberish_answer_policy = self._get_config_safe('GradingPolicy', 'gibberish_answer_policy', 'manual', str)
         
         # 不再从配置文件读取/写入 UI 字号与字体族（移除用户自行调整字号的设定）
         
@@ -341,6 +353,11 @@ class ConfigManager:
             }
             config['Settings'] = {
                 'score_rounding_step': str(self.score_rounding_step),
+            }
+
+            config['GradingPolicy'] = {
+                'blank_answer_policy': str(getattr(self, 'blank_answer_policy', 'zero')),
+                'gibberish_answer_policy': str(getattr(self, 'gibberish_answer_policy', 'manual')),
             }
             
             for i in range(1, self.max_questions + 1):
