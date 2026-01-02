@@ -1,0 +1,1462 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>800</width>
+    <height>970</height>
+   </rect>
+  </property>
+  <property name="sizePolicy">
+   <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
+    <horstretch>0</horstretch>
+    <verstretch>0</verstretch>
+   </sizepolicy>
+  </property>
+  <property name="minimumSize">
+   <size>
+    <width>0</width>
+    <height>970</height>
+   </size>
+  </property>
+  <property name="maximumSize">
+   <size>
+    <width>800</width>
+    <height>970</height>
+   </size>
+  </property>
+  <property name="windowTitle">
+   <string>AI智能阅卷助手 - 科技改变世界</string>
+  </property>
+  <property name="styleSheet">
+   <string notr="true">/* 极淡蓝色整体风格（不改布局，只做视觉微调） */
+QMainWindow,
+QWidget#centralwidget,
+QWidget#scrollAreaWidgetContents {
+    background-color: #E6F1FF;
+}
+
+QScrollArea {
+    background: transparent;
+    border: none;
+}
+
+QGroupBox {
+    background-color: rgba(255, 255, 255, 235);
+    border: 1px solid #BFD8FF;
+    border-radius: 6px;
+    margin-top: 10px;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: 10px;
+    padding: 0 6px;
+    color: #2B4A66;
+}
+
+QLabel {
+    color: #1F2D3D;
+}
+
+QLineEdit,
+QPlainTextEdit,
+QTextEdit,
+QSpinBox,
+QDoubleSpinBox,
+QComboBox {
+    background-color: #FFFFFF;
+    border: 3px solid #5B9FFF;
+    border-radius: 4px;
+    padding: 4px 6px;
+}
+
+QLineEdit:focus,
+QPlainTextEdit:focus,
+QTextEdit:focus,
+QSpinBox:focus,
+QDoubleSpinBox:focus,
+QComboBox:focus {
+    border: 3px solid #4A8EF5;
+}
+
+/* 只读/不可编辑：用偏灰蓝底 + 更弱文字/边框，和可输入控件明显区分 */
+QLineEdit[readOnly=&quot;true&quot;],
+QPlainTextEdit[readOnly=&quot;true&quot;],
+QTextEdit[readOnly=&quot;true&quot;] {
+    background-color: #F2F7FF;
+    color: #5E6F80;
+    border: 1px dashed #AFCBFF;
+}
+
+QLineEdit[readOnly=&quot;true&quot;]:hover,
+QPlainTextEdit[readOnly=&quot;true&quot;]:hover,
+QTextEdit[readOnly=&quot;true&quot;]:hover,
+QLineEdit[readOnly=&quot;true&quot;]:focus,
+QPlainTextEdit[readOnly=&quot;true&quot;]:focus,
+QTextEdit[readOnly=&quot;true&quot;]:focus {
+    background-color: #F2F7FF;
+    color: #5E6F80;
+    border: 1px dashed #AFCBFF;
+}
+
+/* 完全不可用（disabled）：进一步变淡，提示“当前不可操作/不可输入” */
+QLineEdit:disabled,
+QPlainTextEdit:disabled,
+QTextEdit:disabled,
+QSpinBox:disabled,
+QDoubleSpinBox:disabled,
+QComboBox:disabled {
+    background-color: #F3F6FA;
+    color: #7B8DA0;
+    border: 1px solid #D7E3F2;
+}
+
+QPushButton,
+QToolButton {
+    color: #0B2A44;
+    font-weight: 600;
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #EAF5FF,
+                                stop:1 #B9DCFF);
+    border: 1px solid #4F95FF;
+    border-bottom: 2px solid #3F8CFF;
+    border-radius: 6px;
+    padding: 7px 12px;
+    min-height: 28px;
+}
+
+QPushButton:hover,
+QToolButton:hover {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #F3FAFF,
+                                stop:1 #C7E3FF);
+    border-color: #3F8CFF;
+    border-bottom-color: #2F7FFF;
+}
+
+QPushButton:pressed,
+QToolButton:pressed {
+    background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
+                                stop:0 #A8D0FF,
+                                stop:1 #C0E0FF);
+    border-color: #2F7FFF;
+    border-bottom-color: #2F7FFF;
+}
+
+QPushButton:focus,
+QToolButton:focus {
+    border-color: #3F8CFF;
+}
+
+QPushButton:disabled,
+QToolButton:disabled {
+    color: #7B8DA0;
+    background-color: #F4F7FB;
+    border-color: #D7E3F2;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 0px;
+}
+
+QScrollBar::handle:vertical {
+    background: #BFD8FF;
+    min-height: 20px;
+    border-radius: 5px;
+}
+
+QScrollBar::add-line:vertical,
+QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 0px;
+}
+
+QScrollBar::handle:horizontal {
+    background: #BFD8FF;
+    min-width: 20px;
+    border-radius: 5px;
+}
+
+QScrollBar::add-line:horizontal,
+QScrollBar::sub-line:horizontal {
+    width: 0px;
+}</string>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <property name="sizePolicy">
+    <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
+     <horstretch>0</horstretch>
+     <verstretch>0</verstretch>
+    </sizepolicy>
+   </property>
+   <property name="maximumSize">
+    <size>
+     <width>16777215</width>
+     <height>970</height>
+    </size>
+   </property>
+   <layout class="QHBoxLayout" name="horizontalLayout_8">
+    <property name="leftMargin">
+     <number>0</number>
+    </property>
+    <property name="topMargin">
+     <number>0</number>
+    </property>
+    <property name="rightMargin">
+     <number>0</number>
+    </property>
+    <property name="bottomMargin">
+     <number>0</number>
+    </property>
+    <item>
+     <widget class="QScrollArea" name="scrollArea">
+      <property name="sizePolicy">
+       <sizepolicy hsizetype="Preferred" vsizetype="Preferred">
+        <horstretch>0</horstretch>
+        <verstretch>0</verstretch>
+       </sizepolicy>
+      </property>
+      <property name="maximumSize">
+       <size>
+        <width>16777215</width>
+        <height>970</height>
+       </size>
+      </property>
+      <property name="verticalScrollBarPolicy">
+       <enum>Qt::ScrollBarAsNeeded</enum>
+      </property>
+      <property name="horizontalScrollBarPolicy">
+       <enum>Qt::ScrollBarAsNeeded</enum>
+      </property>
+      <property name="sizeAdjustPolicy">
+       <enum>QAbstractScrollArea::AdjustToContents</enum>
+      </property>
+      <property name="widgetResizable">
+       <bool>true</bool>
+      </property>
+      <widget class="QWidget" name="scrollAreaWidgetContents">
+       <property name="enabled">
+        <bool>true</bool>
+       </property>
+       <property name="geometry">
+        <rect>
+         <x>0</x>
+         <y>0</y>
+         <width>800</width>
+         <height>970</height>
+        </rect>
+       </property>
+       <property name="sizePolicy">
+        <sizepolicy hsizetype="Minimum" vsizetype="Preferred">
+         <horstretch>0</horstretch>
+         <verstretch>0</verstretch>
+        </sizepolicy>
+       </property>
+       <property name="minimumSize">
+        <size>
+         <width>780</width>
+         <height>0</height>
+        </size>
+       </property>
+       <layout class="QVBoxLayout" name="verticalLayout">
+        <property name="spacing">
+         <number>0</number>
+        </property>
+        <property name="leftMargin">
+         <number>3</number>
+        </property>
+        <property name="topMargin">
+         <number>0</number>
+        </property>
+        <property name="rightMargin">
+         <number>3</number>
+        </property>
+        <property name="bottomMargin">
+         <number>0</number>
+        </property>
+        <item>
+         <layout class="QHBoxLayout" name="horizontalLayout_3">
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <widget class="QComboBox" name="first_api_url">
+            <property name="enabled">
+             <bool>true</bool>
+            </property>
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="maximumSize">
+             <size>
+              <width>170</width>
+              <height>16777215</height>
+             </size>
+            </property>
+            <property name="editable">
+             <bool>false</bool>
+            </property>
+            <property name="currentIndex">
+             <number>0</number>
+            </property>
+            <item>
+             <property name="text">
+              <string>火山引擎 (推荐)</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>月之暗面</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>智谱清言</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>阿里通义千问</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>百度文心千帆</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>腾讯混元</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>OpenRouter</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>OpenAI</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>Google Gemini</string>
+             </property>
+            </item>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLineEdit" name="first_api_key">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="text">
+             <string/>
+            </property>
+            <property name="placeholderText">
+             <string>API key  必须视觉大模型</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLineEdit" name="first_modelID">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="text">
+             <string/>
+            </property>
+            <property name="placeholderText">
+             <string>AI模型ID  必须视觉大模型</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="horizontalLayout_9">
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <widget class="QCheckBox" name="dual_evaluation_enabled">
+            <property name="enabled">
+             <bool>true</bool>
+            </property>
+            <property name="text">
+             <string>启用双评</string>
+            </property>
+            <property name="checked">
+             <bool>false</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="label_10">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="text">
+             <string> 双评分差</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QSpinBox" name="score_diff_threshold">
+            <property name="minimum">
+             <number>1</number>
+            </property>
+            <property name="maximum">
+             <number>5000</number>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="label_15_q8_2">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="text">
+             <string>分差内提交均分；外停止阅卷           </string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QCheckBox" name="unattended_mode_enabled">
+            <property name="enabled">
+             <bool>true</bool>
+            </property>
+            <property name="toolTip">
+             <string>启用后，AI识别失败时自动填写满分40%，API故障3次后暂停</string>
+            </property>
+            <property name="text">
+             <string>无人模式      </string>
+            </property>
+            <property name="checked">
+             <bool>false</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="api_test_button">
+            <property name="text">
+             <string>测试api连接</string>
+            </property>
+            <property name="shortcut">
+             <string>Esc</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="horizontalLayout_4">
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <widget class="QComboBox" name="second_api_url">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="maximumSize">
+             <size>
+              <width>170</width>
+              <height>16777215</height>
+             </size>
+            </property>
+            <property name="currentIndex">
+             <number>0</number>
+            </property>
+            <item>
+             <property name="text">
+              <string>火山引擎 (推荐)</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>月之暗面</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>智谱清言</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>阿里通义千问</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>百度文心千帆</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>腾讯混元</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>OpenRouter</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>OpenAI</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>Google Gemini</string>
+             </property>
+            </item>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLineEdit" name="second_api_key">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="placeholderText">
+             <string>API key  必须视觉大模型</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLineEdit" name="second_modelID">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="placeholderText">
+             <string>AI模型ID 必须视觉大模型</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <widget class="QTabWidget" name="questionTabs">
+          <property name="currentIndex">
+           <number>0</number>
+          </property>
+          <widget class="QWidget" name="tab_question1">
+           <attribute name="title">
+            <string>题目1 ✅</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_q1">
+            <property name="spacing">
+             <number>3</number>
+            </property>
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_q1_header">
+              <item>
+               <widget class="QCheckBox" name="enableQuestion1">
+                <property name="enabled">
+                 <bool>false</bool>
+                </property>
+                <property name="text">
+                 <string>默认启用</string>
+                </property>
+                <property name="checked">
+                 <bool>true</bool>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="configQuestion1">
+                <property name="text">
+                 <string>配置阅卷信息</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_step1">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>            步长： </string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="score_rounding_step_1">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>60</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <property name="toolTip">
+                 <string>控制本题最终提交分数的精度</string>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>0.5</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>1</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>1.5</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>2</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_15">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string/>
+                </property>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QPlainTextEdit" name="StandardAnswer_text_1">
+              <property name="placeholderText">
+               <string>请输入第1题的评分细则...</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_question2">
+           <attribute name="title">
+            <string>题目2</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_q2">
+            <property name="spacing">
+             <number>3</number>
+            </property>
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_q2_header">
+              <item>
+               <widget class="QCheckBox" name="enableQuestion2">
+                <property name="text">
+                 <string>启用2题</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="configQuestion2">
+                <property name="text">
+                 <string>配置阅卷信息</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_step2">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>  步长</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="score_rounding_step_2">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>60</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>0.5</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>1</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QPlainTextEdit" name="StandardAnswer_text_2">
+              <property name="placeholderText">
+               <string>请输入第2题的评分细则...</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_question3">
+           <attribute name="title">
+            <string>题目3</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_q3">
+            <property name="spacing">
+             <number>3</number>
+            </property>
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_q3_header">
+              <item>
+               <widget class="QCheckBox" name="enableQuestion3">
+                <property name="text">
+                 <string>启用3题</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="configQuestion3">
+                <property name="text">
+                 <string>配置阅卷信息</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_step3">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>  步长</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="score_rounding_step_3">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>60</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>0.5</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>1</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QPlainTextEdit" name="StandardAnswer_text_3">
+              <property name="placeholderText">
+               <string>请输入第3题的评分细则...</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_question4">
+           <attribute name="title">
+            <string>题目4</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_q4">
+            <property name="spacing">
+             <number>3</number>
+            </property>
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_q4_header">
+              <item>
+               <widget class="QCheckBox" name="enableQuestion4">
+                <property name="text">
+                 <string>启用4题</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="configQuestion4">
+                <property name="text">
+                 <string>配置阅卷信息</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_step4">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>  步长</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="score_rounding_step_4">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>60</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>0.5</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>1</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QPlainTextEdit" name="StandardAnswer_text_4">
+              <property name="placeholderText">
+               <string>请输入第4题的评分细则...</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_question5">
+           <attribute name="title">
+            <string>题目5</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_q5">
+            <property name="spacing">
+             <number>3</number>
+            </property>
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_q5_header">
+              <item>
+               <widget class="QCheckBox" name="enableQuestion5">
+                <property name="text">
+                 <string>启用5题</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="configQuestion5">
+                <property name="text">
+                 <string>配置阅卷信息</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_step5">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>  步长</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="score_rounding_step_5">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>60</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>0.5</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>1</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QPlainTextEdit" name="StandardAnswer_text_5">
+              <property name="placeholderText">
+               <string>请输入第5题的评分细则...</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_question6">
+           <attribute name="title">
+            <string>题目6</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_q6">
+            <property name="spacing">
+             <number>3</number>
+            </property>
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_q6_header">
+              <item>
+               <widget class="QCheckBox" name="enableQuestion6">
+                <property name="text">
+                 <string>启用6题</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="configQuestion6">
+                <property name="text">
+                 <string>配置阅卷信息</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_step6">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>  步长</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="score_rounding_step_6">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>60</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>0.5</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>1</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QPlainTextEdit" name="StandardAnswer_text_6">
+              <property name="placeholderText">
+               <string>请输入第6题的评分细则...</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_question7">
+           <attribute name="title">
+            <string>题目7</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_q7">
+            <property name="spacing">
+             <number>3</number>
+            </property>
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_q7_header">
+              <item>
+               <widget class="QCheckBox" name="enableQuestion7">
+                <property name="text">
+                 <string>启用7题</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="configQuestion7">
+                <property name="text">
+                 <string>配置阅卷信息</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_step7">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>  步长</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="score_rounding_step_7">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>60</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>0.5</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>1</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QPlainTextEdit" name="StandardAnswer_text_7">
+              <property name="placeholderText">
+               <string>请输入第7题的评分细则...</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="tab_question8">
+           <attribute name="title">
+            <string>题目8</string>
+           </attribute>
+           <layout class="QVBoxLayout" name="verticalLayout_q8">
+            <property name="spacing">
+             <number>3</number>
+            </property>
+            <item>
+             <layout class="QHBoxLayout" name="horizontalLayout_q8_header">
+              <item>
+               <widget class="QCheckBox" name="enableQuestion8">
+                <property name="text">
+                 <string>启用本题</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QPushButton" name="configQuestion8">
+                <property name="text">
+                 <string>配置阅卷信息</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QLabel" name="label_step8">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>  步长</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="score_rounding_step_8">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>60</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>0.5</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>1</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QPlainTextEdit" name="StandardAnswer_text_8">
+              <property name="placeholderText">
+               <string>请输入第8题的评分细则...</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </widget>
+         </widget>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="horizontalLayout">
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>0</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <item>
+           <widget class="QComboBox" name="subject_text">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Preferred" vsizetype="Fixed">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="maximumWidth">
+             <number>150</number>
+            </property>
+            <property name="currentIndex">
+             <number>0</number>
+            </property>
+            <item>
+             <property name="text">
+              <string>初中语文</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>初中数学</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>初中英语</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>初中物理</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>初中化学</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>初中生物</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>初中政治</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>初中历史</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>初中地理</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>高中语文</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>高中数学</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>高中英语</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>高中物理</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>高中化学</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>高中生物</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>高中政治</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>高中历史</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string>高中地理</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
+              <string/>
+             </property>
+            </item>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="label_13">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="text">
+             <string>   自动改卷份数</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QSpinBox" name="cycle_number">
+            <property name="minimum">
+             <number>1</number>
+            </property>
+            <property name="maximum">
+             <number>9999</number>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="label_11">
+            <property name="sizePolicy">
+             <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+              <horstretch>0</horstretch>
+              <verstretch>0</verstretch>
+             </sizepolicy>
+            </property>
+            <property name="text">
+             <string>    翻页后等待 </string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QDoubleSpinBox" name="wait_time">
+            <property name="suffix">
+             <string> 秒</string>
+            </property>
+            <property name="decimals">
+             <number>1</number>
+            </property>
+            <property name="minimum">
+             <double>0.500000000000000</double>
+            </property>
+            <property name="maximum">
+             <double>9.900000000000000</double>
+            </property>
+            <property name="singleStep">
+             <double>0.100000000000000</double>
+            </property>
+            <property name="value">
+             <double>1.500000000000000</double>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="auto_run_but">
+            <property name="minimumWidth">
+             <number>160</number>
+            </property>
+            <property name="text">
+             <string>运行自动改卷</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="stop_but">
+            <property name="text">
+             <string>中止(Esc)</string>
+            </property>
+            <property name="shortcut">
+             <string>Esc</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+        <item>
+         <widget class="QTextBrowser" name="log_text">
+          <property name="maximumSize">
+           <size>
+            <width>16777215</width>
+            <height>400</height>
+           </size>
+          </property>
+          <property name="placeholderText">
+           <string>AI阅卷信息将显示在这里...</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
