@@ -1,4 +1,4 @@
-# --- START OF FILE config_manager.py ---
+# config_manager.py - 配置管理模块
 
 import configparser
 import os
@@ -105,7 +105,7 @@ class ConfigManager:
 
     def _safe_load_config(self):
         """安全地加载配置，缺失项使用默认值"""
-        # --- CHANGED: 加载 provider 而不是 url ---
+
         # 兼容旧/错误配置：允许 provider 字段写入 UI 文本（如“火山引擎 (推荐)”），自动映射为内部 provider_id（如 volcengine）。
         self.first_api_provider = self._normalize_ai_provider_value(
             self._get_config_safe('API', 'first_api_provider', "volcengine"),
@@ -245,7 +245,6 @@ class ConfigManager:
 
     def _update_memory_config(self, field_name, value):
         """更新内存中的配置"""
-        # --- CHANGED: 更新 provider 而不是 url ---
         if field_name == 'first_api_provider': self.first_api_provider = str(value) if value else ""
         elif field_name == 'first_api_key': self.first_api_key = str(value) if value else ""
         elif field_name == 'first_modelID': self.first_modelID = str(value) if value else ""
@@ -287,7 +286,6 @@ class ConfigManager:
 
         if field_type == 'enabled': self.question_configs[q_index]['enabled'] = bool(value)
         elif field_type == 'standard_answer': self.question_configs[q_index]['standard_answer'] = str(value) if value else ""
-        # 其他题目配置的更新逻辑保持不变...
         elif field_type == 'score_input_pos': self.question_configs[q_index]['score_input_pos'] = value
         elif field_type == 'confirm_button_pos': self.question_configs[q_index]['confirm_button_pos'] = value
         elif field_type == 'answer_area': self.question_configs[q_index]['answer_area'] = value
@@ -321,7 +319,6 @@ class ConfigManager:
         try:
             config = configparser.ConfigParser(interpolation=None)
             
-            # --- CHANGED: 保存 provider 而不是 url ---
             config['API'] = {
                 'first_api_provider': str(self.first_api_provider),
                 'first_api_key': str(self.first_api_key),
@@ -333,17 +330,15 @@ class ConfigManager:
             config['UI'] = {'subject': str(self.subject)}
             config['Auto'] = {
                 'cycle_number': str(self.cycle_number), 
-                'wait_time': f"{self.wait_time:.1f}",  # 格式化为1位小数，避免浮点精度问题
+                'wait_time': f"{self.wait_time:.1f}",
                 'api_reset_interval': str(self.api_reset_interval)
             }
             config['DualEvaluation'] = {'enabled': str(self.dual_evaluation_enabled), 'score_diff_threshold': str(self.score_diff_threshold)}
-            # 保存无人模式配置
             config['UnattendedMode'] = {
                 'enabled': str(self.unattended_mode_enabled),
                 'retry_delay': str(self.unattended_retry_delay),
                 'max_retry_rounds': str(self.unattended_max_retry_rounds)
             }
-            # 保存分数步长配置
             config['Settings'] = {
                 'score_rounding_step': str(self.score_rounding_step),
             }
@@ -364,7 +359,7 @@ class ConfigManager:
                     'enable_next_button': str(q_config['enable_next_button']),
                     'enable_anomaly_button': str(q_config.get('enable_anomaly_button', False)),
                     'question_type': q_config.get('question_type', 'Subjective_PointBased_QA'),
-                    'score_rounding_step': str(q_config.get('score_rounding_step', 0.5)),  # 每题独立步长
+                    'score_rounding_step': str(q_config.get('score_rounding_step', 0.5)),
                     'score_input': f"{q_config['score_input_pos'][0]},{q_config['score_input_pos'][1]}" if q_config['score_input_pos'] else "",
                     'confirm_button': f"{q_config['confirm_button_pos'][0]},{q_config['confirm_button_pos'][1]}" if q_config['confirm_button_pos'] else "",
                     'next_button_pos': f"{q_config['next_button_pos'][0]},{q_config['next_button_pos'][1]}" if q_config['next_button_pos'] else "",
@@ -405,11 +400,8 @@ class ConfigManager:
         return self.question_configs.get(str(question_index), {'enabled': False})
     
     def check_required_settings(self):
-        # 简化检查，MainWindow将负责UI层面的验证提示
         if not self.first_api_key or not self.first_modelID or not self.first_api_provider:
             return False
         if self.dual_evaluation_enabled and (not self.second_api_key or not self.second_modelID or not self.second_api_provider):
             return False
         return True
-
-# --- END OF FILE config_manager.py ---

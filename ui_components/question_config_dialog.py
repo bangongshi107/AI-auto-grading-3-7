@@ -1,4 +1,4 @@
-# --- START OF FILE question_config_dialog.py (Corrected) ---
+# question_config_dialog.py - 题目配置对话框模块
 
 from typing import Optional, Any
 from PyQt5.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, 

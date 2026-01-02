@@ -1,65 +1,5 @@
-# --- START OF FILE api_service.py ---
-#
-# ==============================================================================
-#  API 集成更新摘要 (API Integration Update Summary)
-# ==============================================================================
-#
-#  版本: v2.2.1
-#  更新日期: 2025年09月14日
-#  更新人员: AI Assistant
-#
-#  重大变更:
-#  1. API Key格式处理增强 - 解决用户输入格式不一致的问题
-#     * 新增 `_preprocess_api_key` 方法，统一处理不同格式的API Key
-#     * 腾讯API Key: 支持中文冒号自动转换，增强格式验证
-#     * Bearer Token: 智能移除重复的"Bearer "前缀
-#     * 提供详细的错误提示和格式指导
-#  2. 统一兼容Payload构建器 - 修正并统一了所有OpenAI兼容模型的请求构建逻辑。
-#     * `_build_openai_compatible_payload` 现遵循"图片在前，文本在后"的最大兼容原则。
-#     * 阿里云、百度、Moonshot、智谱等统一使用此构建器，大幅减少代码冗余。
-#     * 删除了重复的 `_build_aliyun_payload` 和 `_build_baidu_payload` 函数。
-#  3. 百度文心千帆V2 API升级 - 从旧版API迁移到全新V2版本
-#     * Endpoint: https://qianfan.baidubce.com/v2/chat/completions
-#     * 鉴权方式: Bearer token (bce-v3/ALTAK-...格式)
-#     * 请求格式: 与OpenAI接口高度兼容
-#     * 响应解析: 标准 choices[0].message.content 格式
-#  4. 腾讯混元 API 集成更新 - 统一使用 ChatCompletions 接口
-#     * 从 ImageQuestion 迁移到 ChatCompletions action (无频率限制)
-#     * 实现腾讯云 TC3-HMAC-SHA256 签名方法 v3
-#     * 智能模型适配 - 支持所有腾讯视觉模型的自动检测和适配
-#     * 最大兼容性 - 用户输入的任何腾讯视觉模型都能正确调用
-#
-#  支持的视觉模型:
-#  百度文心千帆:
-#  - # deepseek-vl2 (推荐) - 2025/9/14，deepseek官方未提供视觉模型，暂时不使用
-#  - ernie-4.5-vl-28b-a3b (深度思考)
-#  - qwen2.5-vl 系列
-#  - llama-4-maverick-17b-128e-instruct (多图输入)
-#  - internvl2_5-38b-mpo
-#
-#  腾讯混元:
-#  - hunyuan-vision (基础多模态模型)
-#  - hunyuan-turbos-vision (旗舰视觉模型)
-#  - hunyuan-turbos-vision-20250619 (最新旗舰版本)
-#  - hunyuan-t1-vision (深度思考视觉模型)
-#  - hunyuan-t1-vision-20250619 (最新深度思考版本)
-#  - hunyuan-large-vision (多语言视觉模型)
-#
-#  技术特性:
-#  - API Key 格式: Bearer bce-v3/ALTAK-... (百度) / SecretId:SecretKey (腾讯)
-#  - 鉴权方式: Bearer token / 腾讯云签名方法 v3
-#  - 接口类型: ChatCompletions (兼容OpenAI格式)
-#  - 图像格式: JPEG base64编码
-#  - 响应解析: 标准 choices[0].message.content 格式
-#
-#  未来维护指南:
-#  1. 新模型适配: 监控各厂商官方文档更新
-#  2. API变更: 及时跟进接口格式变化
-#  3. 错误处理: 关注签名过期和服务错误码
-#  4. 性能优化: 注意请求频率和超时设置
-#  5. 兼容性: 保持与OpenAI接口的兼容性
-#
-# ==============================================================================
+# api_service.py - AI评分API服务模块
+# 支持多平台：火山引擎、阿里通义、百度千帆、腾讯混元、智谱、月之暗面、OpenRouter、OpenAI、Google Gemini
 
 import requests
 import logging
@@ -340,11 +280,11 @@ class ApiService:
             if not all([provider, api_key, model_id]):
                 return None, f"第{api_group}组API配置不完整 (供应商、Key或模型ID为空)"
 
-            print(f"[API] 准备调用 {api_group} API, 供应商: {provider}")
+            self.logger.debug(f"[API] 准备调用 {api_group} API, 供应商: {provider}")
             return self._execute_api_call(provider, api_key, model_id, img_str, prompt)
         except Exception as e:
             error_detail = traceback.format_exc()
-            print(f"[API] 调用 {api_group} API 时发生严重错误: {str(e)}\n{error_detail}")
+            self.logger.exception(f"[API] 调用 {api_group} API 时发生严重错误: {str(e)}\n{error_detail}")
             return None, f"API调用失败: {str(e)}"
 
     def test_api_connection(self, api_group: str) -> Tuple[bool, str]:
@@ -364,7 +304,7 @@ class ApiService:
                 return False, "无效的API组别"
             
             if not all([provider, api_key.strip(), model_id.strip()]):
-                return False, f"{group_name}API配置不完整"
+                return False, f"{group_name}组信息没填完整（平台/密钥/模型ID）"
 
             # 兼容：provider 可能是 UI 文本
             if provider and provider not in PROVIDER_CONFIGS:
@@ -380,24 +320,45 @@ class ApiService:
                         pass
 
             # 测试AI评分API
-            print(f"[API Test] 测试{group_name}API, 供应商: {provider}")
+            self.logger.info(f"[API Test] 测试{group_name}API, 供应商: {provider}")
             result, error = self._execute_api_call(provider, api_key, model_id, img_str="", prompt="你好")
 
             provider_name = PROVIDER_CONFIGS.get(provider, {}).get("name", provider)
             
+            def _friendly_reason(err: Optional[str]) -> str:
+                s = (err or "").strip()
+                low = s.lower()
+                if any(k in low for k in ["timed out", "timeout"]):
+                    return "网络可能不稳定（连接超时）"
+                if any(k in low for k in ["401", "unauthorized", "invalid api key"]):
+                    return "密钥可能不正确或已失效"
+                if any(k in low for k in ["403", "forbidden", "quota", "余额", "payment", "insufficient"]):
+                    return "账号可能没有权限或余额/额度不足"
+                if any(k in low for k in ["429", "rate limit", "too many"]):
+                    return "请求太频繁，平台临时限制"
+                if any(k in low for k in ["502", "503", "504", "service unavailable", "bad gateway"]):
+                    return "平台服务繁忙或临时不可用"
+                if not s:
+                    return "原因不明"
+                return s
+
             if not (result and not error):
-                enhanced_error = f"❌ {provider_name}: {error}"
-                suggestion = "\n\n💡 请检查API Key、模型ID是否正确，并确保账户有充足余额"
-                return False, enhanced_error + suggestion
+                reason = _friendly_reason(error)
+                msg = (
+                    f"{provider_name}：连接失败。\n"
+                    f"可能原因：{reason}。\n"
+                    "建议：检查密钥/模型ID是否填写正确；确认账号余额/额度；网络正常后再试。"
+                )
+                return False, msg
             
             # AI评分API连接成功，构建结果信息
-            result_info = f"✓ {provider_name}: 连接成功"
+            result_info = f"{provider_name}：连接成功"
             
             return True, result_info
         except Exception as e:
             error_detail = traceback.format_exc()
-            print(f"[API Test] API测试过程中发生异常: {str(e)}\n{error_detail}")
-            return False, f"API测试异常: {str(e)}"
+            self.logger.exception(f"[API Test] API测试过程中发生异常: {str(e)}\n{error_detail}")
+            return False, f"测试时出错：{str(e)}"
 
     def _preprocess_api_key(self, api_key: str, auth_method: str) -> Tuple[str, Optional[str]]:
         """
@@ -569,7 +530,7 @@ class ApiService:
             if provider == "gemini":
                 return data["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError) as e:
-            print(f"解析{provider}响应失败: {e}")
+            self.logger.warning(f"解析{provider}响应失败: {e}")
             return None # 解析失败
         return str(data) # Fallback
 
@@ -865,59 +826,3 @@ class ApiService:
             validation_results[provider_id] = result
         
         return validation_results
-
-# ==============================================================================
-#  配置验证和诊断函数 (Configuration Validation and Diagnostics)
-# ==============================================================================
-def validate_all_providers() -> None:
-    """
-    验证所有API提供商的配置完整性
-    用于开发和调试目的
-    """
-    print("=" * 80)
-    print("API提供商配置验证报告")
-    print("=" * 80)
-    
-    # 创建临时实例进行验证
-    class MockConfigManager:
-        """模拟配置管理器用于验证"""
-        pass
-    
-    service = ApiService(MockConfigManager())
-    results = service.validate_provider_configuration()
-    
-    complete_count = 0
-    incomplete_count = 0
-    
-    for provider_id, result in results.items():
-        status = "✅ 完整" if result["is_complete"] else "❌ 不完整"
-        print(f"\n{status} [{provider_id}] {result['name']}")
-        
-        if result["is_complete"]:
-            complete_count += 1
-        else:
-            incomplete_count += 1
-            # 显示缺失的部分
-            issues = []
-            if not result["has_url"]:
-                issues.append("缺少URL配置")
-            if not result["has_auth_method"]:
-                issues.append("缺少认证方法")
-            if not result["has_payload_builder"]:
-                issues.append("缺少payload构建器配置")
-            if not result["payload_builder_exists"]:
-                issues.append("payload构建器未实现")
-            if not result["response_parser_exists"]:
-                issues.append("响应解析器未实现")
-            
-            print(f"   问题: {', '.join(issues)}")
-    
-    print("\n" + "=" * 80)
-    print(f"验证摘要: 完整 {complete_count} 个, 不完整 {incomplete_count} 个")
-    print("=" * 80)
-
-# 如果直接运行此文件，执行验证
-if __name__ == "__main__":
-    validate_all_providers()
-
-# --- END OF FILE api_service.py ---

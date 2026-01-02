@@ -1,11 +1,12 @@
-# --- START OF FILE main_window.py ---
+# main_window.py - 主窗口UI模块
 
 import sys
 import os
+import traceback
 import datetime
 import pathlib
-import traceback
-from typing import Union, Optional, Type, TypeVar, cast
+import re
+from typing import Union, Optional, Type, TypeVar, cast, Tuple
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QMessageBox, QDialog,
                              QComboBox, QLineEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
                              QPlainTextEdit, QApplication, QShortcut, QLabel, QPushButton)
@@ -24,8 +25,6 @@ class MainWindow(QMainWindow):
     LOG_LEVEL_RESULT = "RESULT"  # AI评分结果
     LOG_LEVEL_ERROR = "ERROR"    # 错误信息
 
-    # ... (信号定义部分保持不变) ...
-    # update_signal = pyqtSignal(str)
     log_signal = pyqtSignal(str, bool, str)  # message, is_error, level
     progress_signal = pyqtSignal(int, int)
     finished_signal = pyqtSignal()
@@ -38,7 +37,7 @@ class MainWindow(QMainWindow):
         self.worker = worker
         self._is_initializing = True
 
-        # ... (UI文件加载部分保持不变) ...
+        # 加载UI文件
         if getattr(sys, 'frozen', False):
             base_path = sys._MEIPASS  # type: ignore
         else:
@@ -46,10 +45,10 @@ class MainWindow(QMainWindow):
         ui_path = os.path.join(base_path, "setting", "七题.ui")
         uic.loadUi(ui_path, self)
 
-        # ... (其他初始化属性保持不变) ...
+        # 初始化属性
         self.answer_windows = {}
         self.current_question = 1
-        self.max_questions = 7  # 多题模式最多支持7道题（已移除第8题）
+        self.max_questions = 7  # 多题模式最多支持7道题
         self.shortcut_esc = QShortcut(QKeySequence("Escape"), self)
         self.shortcut_esc.activated.connect(self.stop_auto_thread)
         self._ui_cache = {}
@@ -61,6 +60,254 @@ class MainWindow(QMainWindow):
         self.show()
         self._is_initializing = False
         self.log_message("主窗口初始化完成")
+
+    # ======================================================================
+    #  面向老师的“人话提示”工具
+    # ======================================================================
+
+    def _get_base_dir(self) -> pathlib.Path:
+        """获取可写日志目录的基准路径（兼容打包/源码运行）。"""
+        try:
+            if getattr(sys, 'frozen', False):
+                return pathlib.Path(sys.executable).parent
+        except Exception:
+            pass
+        return pathlib.Path(__file__).resolve().parent.parent
+
+    def _write_debug_log(self, title: str, detail: str) -> Optional[pathlib.Path]:
+        """写入调试日志（给技术人员/开发者看），不打扰普通用户。"""
+        try:
+            base_dir = self._get_base_dir()
+            log_dir = base_dir / "logs"
+            log_dir.mkdir(exist_ok=True)
+            now = datetime.datetime.now()
+            filename = f"ui_{title}_{now.strftime('%Y%m%d_%H%M%S')}.log"
+            file_path = log_dir / filename
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(detail or "")
+            return file_path
+        except Exception:
+            return None
+
+    def _simplify_message_for_teacher(self, text: str) -> Tuple[str, str]:
+        """把复杂/英文/堆栈信息压缩成老师能看懂的提示。
+
+        Returns:
+            (summary, detail)
+            - summary: 给用户看的简短说明 + 建议操作
+            - detail: 原始信息（可放到“详细信息”或日志文件）
+        """
+        original = (text or "").strip()
+        if not original:
+            return "发生了问题，但没有收到具体原因。", ""
+
+        detail = original
+        low = original.lower()
+
+        # ==================================================================
+        # 先做“业务前缀/建议行”去噪：避免 UI 堆叠同一句话
+        # ==================================================================
+        # 去掉常见错误前缀
+        cleaned_for_parse = re.sub(r"^\s*\[(错误|业务错误|网络错误|配置错误|资源错误|系统错误)\]\s*", "", original).strip()
+
+        # 如果包含“→ 建议: ...”，UI主消息只保留第一句原因；建议由本函数统一给出
+        # （detail 仍保留原始文本，便于排查）
+        if "→" in cleaned_for_parse and "建议" in cleaned_for_parse:
+            cleaned_for_parse = re.split(r"\n\s*→\s*建议\s*:\s*", cleaned_for_parse, maxsplit=1)[0].strip()
+
+        # 用户主动停止：不算错误，也不需要“检查密钥/网络”等建议
+        if any(k in low for k in ["用户手动停止", "手动停止", "user stopped", "user stop"]):
+            return "已停止（用户手动停止）。", ""
+
+        # 若包含 traceback，正文只给一句“程序内部出错”，细节进日志
+        if "traceback (most recent call last)" in low:
+            return "程序内部出现了错误，已停止当前操作。\n建议：关闭软件重新打开后再试一次。", detail
+
+        # ==================================================================
+        # 关键场景：异常试卷 / 无有效内容 / 需要人工介入
+        # 目标：只给老师一句“发生了什么 + 下一步做什么”，不再堆叠多条来源信息。
+        # ==================================================================
+        if any(k in cleaned_for_parse for k in ["异常试卷", "无有效内容"]):
+            # 尝试提取题号
+            q_match = re.search(r"题目\s*(\d+)", cleaned_for_parse) or re.search(r"第\s*(\d+)\s*题", cleaned_for_parse)
+            q = q_match.group(1) if q_match else ""
+
+            # 提取括号内原因：例如 (无有效内容)
+            reason = ""
+            m = re.search(r"异常试卷\s*\(?\s*([^\)\n]+?)\s*\)?", cleaned_for_parse)
+            if m:
+                reason = m.group(1).strip()
+            if not reason and "无有效内容" in cleaned_for_parse:
+                reason = "无有效内容"
+
+            reason_part = f"（{reason}）" if reason else ""
+            head = f"题目{q}：" if q else ""
+
+            # 是否提示“启用异常卷按钮”
+            need_button_tip = any(k in cleaned_for_parse for k in ["未启用异常卷按钮", "未配置坐标"])
+            tip = "可选：在题目配置里启用“异常卷按钮”，下次可自动跳过。" if need_button_tip else ""
+
+            summary = f"{head}检测到异常试卷{reason_part}。已暂停，请人工处理后继续。"
+            if tip:
+                summary += f"\n{tip}"
+            return summary, detail
+
+        if any(k in cleaned_for_parse for k in ["需人工介入", "需要人工介入", "人工介入"]):
+            # 这里不再复述多层包装，只提示下一步
+            # 尝试保留题号信息
+            q_match = re.search(r"题目\s*(\d+)", cleaned_for_parse) or re.search(r"第\s*(\d+)\s*题", cleaned_for_parse)
+            q = q_match.group(1) if q_match else ""
+            head = f"题目{q}：" if q else ""
+            return f"{head}需要人工介入处理。已暂停，请处理后继续。", detail
+
+        # 去掉常见 emoji/符号，减少干扰
+        cleaned = re.sub(r"[✅❌⚠️💡]", "", original).strip()
+
+        # 统一术语为更口语的中文
+        replacements = {
+            "api": "AI接口",
+            "key": "密钥",
+            "model": "模型",
+            "model id": "模型ID",
+            "unauthorized": "未授权",
+            "forbidden": "无权限",
+            "rate limit": "请求太频繁",
+            "timeout": "网络超时",
+        }
+        simplified = cleaned
+        for k, v in replacements.items():
+            simplified = re.sub(k, v, simplified, flags=re.IGNORECASE)
+
+        # JSON/响应格式问题：通常是模型输出不符合要求（不要提示“检查密钥”）
+        if any(k in low for k in ["json解析", "json parse", "响应格式", "api响应格式异常", "format" ]):
+            return (
+                "AI接口返回格式异常，已停止当前操作。\n"
+                "建议：切换模型或更换AI平台后再试。",
+                detail,
+            )
+
+        # 典型错误归因（尽量“原因 + 怎么办”）
+        if any(k in low for k in ["timed out", "timeout", "read timed out"]):
+            return (
+                "网络可能不稳定，连接超时。\n"
+                "建议：1）检查网络是否能上网  2）稍等1分钟再点一次“测试/开始”。",
+                detail,
+            )
+
+        if any(k in low for k in ["401", "unauthorized", "invalid api key", "api key"]):
+            return (
+                "AI平台提示“密钥不正确或已失效”。\n"
+                "建议：到平台后台重新复制密钥，粘贴到软件里再测试。",
+                detail,
+            )
+
+        if any(k in low for k in ["403", "forbidden", "insufficient", "quota", "余额", "payment"]):
+            return (
+                "AI平台账号可能没有权限或余额不足。\n"
+                "建议：检查账号余额/额度；必要时更换一个可用的AI平台。",
+                detail,
+            )
+
+        if any(k in low for k in ["429", "请求太频繁", "rate limit", "too many"]):
+            return (
+                "请求太频繁，AI平台暂时不让访问。\n"
+                "建议：等10~30秒再试；或开启/使用第二组AI作为备用。",
+                detail,
+            )
+
+        if any(k in low for k in ["502", "503", "504", "service unavailable", "bad gateway"]):
+            return (
+                "AI平台当前服务繁忙或临时不可用。\n"
+                "建议：稍后再试；或切换到第二组AI平台。",
+                detail,
+            )
+
+        if any(k in low for k in ["permission", "permissionerror", "access is denied", "被占用", "正在使用"]):
+            return (
+                "文件可能正在被占用，或没有写入权限。\n"
+                "建议：1）关闭所有Excel文件  2）把软件放到桌面/D盘再运行  3）再试一次。",
+                detail,
+            )
+
+        # 默认：给一个稳妥的通用说明（保持简短，不堆叠括号/前后缀）
+        short_reason = f"{simplified[:80]}{'…' if len(simplified) > 80 else ''}".strip()
+        return (f"操作未成功：{short_reason}。建议：检查密钥/模型ID/网络后再试。", detail)
+
+    def _normalize_log_text(self, text: str, preserve_newlines: bool = False) -> str:
+        """对日志文本做去噪与去重（面向主界面日志区/弹窗）。"""
+        t = (text or "").strip()
+        if not t:
+            return ""
+
+        # 去掉常见重复前缀
+        prefixes = [
+            "[提示]",
+            "[信息]",
+            "[错误]",
+            "错误:",
+            "错误：",
+            "操作未成功：",
+            "操作未成功:",
+            "任务已停止：",
+            "任务已停止:",
+            "任务已停止",
+            "需要人工介入:",
+            "需要人工介入：",
+        ]
+        changed = True
+        while changed:
+            changed = False
+            for p in prefixes:
+                if t.startswith(p):
+                    t = t[len(p):].strip()
+                    changed = True
+
+        # 清理奇怪的冒号/括号堆叠
+        t = re.sub(r"[:：]{2,}", "：", t)
+
+        # 默认会把所有空白（含换行）压成单个空格，避免日志区刷屏。
+        # 但 RESULT 需要保留换行（例如：标题行 + 评分依据明细）。
+        if preserve_newlines:
+            lines = [re.sub(r"[\t\f\v ]+", " ", line).strip() for line in t.splitlines()]
+            # 去掉空行（避免出现很多空白段落）
+            lines = [line for line in lines if line]
+            t = "\n".join(lines).strip()
+        else:
+            t = re.sub(r"\s+", " ", t).strip()
+
+        # 统一一些“重复来源”表述（避免同一句话出现多种开头）
+        t = re.sub(r"^API\s*[12]\s*检测到异常试卷\s*[:：]\s*", "检测到异常试卷：", t)
+        t = re.sub(r"^检测到异常试卷\s*[:：]\s*", "检测到异常试卷：", t)
+
+        # 若包含多段“建议：...建议：...”，只保留第一段（UI不刷屏，细节在logs）
+        if t.count("建议：") >= 2:
+            first, _, rest = t.partition("建议：")
+            # first 里可能还带一段内容，把第一个“建议：xxx”拼回去
+            second = rest.split("建议：", 1)[0].strip()
+            t = (first + "建议：" + second).strip()
+        return t
+
+    def _escape_html(self, text: str) -> str:
+        return (
+            (text or "")
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+
+    def _show_message(self, title: str, summary: str, icon=QMessageBox.Warning, detail: str = "") -> None:
+        """统一的消息框：主文本简单易懂，技术细节放到详细信息。"""
+        msg_box = QMessageBox(self)
+        msg_box.setIcon(icon)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(summary)
+        if detail:
+            msg_box.setDetailedText(detail)
+        msg_box.setSizeGripEnabled(True)
+        msg_box.setMinimumSize(680, 320)
+        msg_box.setStyleSheet("QLabel{min-width: 560px;}")
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.exec_()
 
     # ==========================================================================
     #  核心修改：配置处理逻辑
@@ -137,7 +384,6 @@ class MainWindow(QMainWindow):
                     lambda text, name=combo_name: self.handle_comboBox_save(name, text)
                 )
 
-        # 其他控件的信号连接保持不变...
         # cycle_number 使用 QSpinBox
         cycle_widget = self.get_ui_element('cycle_number', QSpinBox)
         if cycle_widget:
@@ -157,7 +403,6 @@ class MainWindow(QMainWindow):
             if std_answer_widget:
                 self._connect_plain_text_edit_save_signal(std_answer_widget, i)
 
-    # --- eventFilter 和 _connect_plain_text_edit_save_signal 保持不变 ---
     def _connect_plain_text_edit_save_signal(self, widget, question_index):
         widget.setProperty('question_index', question_index)
         widget.setProperty('needs_save_on_focus_out', True)
@@ -263,9 +508,9 @@ class MainWindow(QMainWindow):
                     if ui_text_to_select:
                         combo_box.setCurrentText(ui_text_to_select)
                     else:
-                        combo_box.setCurrentIndex(0) # 如果找不到，默认选第一个
+                        combo_box.setCurrentIndex(0)  # 如果找不到，默认选第一个
 
-            # 加载其他配置 (保持不变)
+            # 加载其他配置
             subject_widget = self.get_ui_element('subject_text', QComboBox)
             if subject_widget: subject_widget.setCurrentText(self.config_manager.subject)
             
@@ -290,8 +535,7 @@ class MainWindow(QMainWindow):
             if unattended_element and isinstance(unattended_element, QCheckBox):
                 unattended_element.setChecked(self.config_manager.unattended_mode_enabled)
 
-
-            # 加载题目配置 (支持8道题)
+            # 加载题目配置
             for i in range(1, self.max_questions + 1):
                 q_config = self.config_manager.get_question_config(i)
                 
@@ -332,13 +576,14 @@ class MainWindow(QMainWindow):
             self.log_message("配置已成功加载到UI并应用约束。")
             self._config_loaded_once = True
         except Exception as e:
-            self.log_message(f"加载配置到UI时出错: {e}\n{traceback.format_exc()}", is_error=True)
+            detail = traceback.format_exc()
+            log_path = self._write_debug_log("load_config", detail)
+            msg = "读取设置时出错，但不影响打开主界面。\n建议：关闭软件重新打开；如果反复出现，请把 logs 里的日志发给技术人员。"
+            if log_path:
+                msg += f"\n（已保存日志：{log_path.name}）"
+            self.log_message(msg, is_error=True)
         finally:
             self._is_initializing = False
-
-    # ==========================================================================
-    #  按钮点击和事件处理 (大部分保持不变)
-    # ==========================================================================
 
     def auto_run_but_clicked(self):
         """自动运行按钮点击事件"""
@@ -348,31 +593,46 @@ class MainWindow(QMainWindow):
 
         self.log_message("尝试在运行前保存所有配置...")
         if not self.config_manager.save_all_configs_to_file():
-            self.log_message("错误：运行前保存配置失败！无法启动自动阅卷。", is_error=True)
-            # 创建完整显示的保存失败提示框
-            msg_box = QMessageBox(self)
-            msg_box.setIcon(QMessageBox.Critical)
-            msg_box.setWindowTitle("保存失败")
-            msg_box.setText("保存配置失败。\n\n请检查下方日志以获取更多详细信息。")
-            msg_box.setSizeGripEnabled(True)
-            msg_box.setMinimumSize(500, 200)
-            msg_box.setStyleSheet("QLabel{min-width: 400px;}")
-            msg_box.setStandardButtons(QMessageBox.Ok)
-            msg_box.exec_()
+            self.log_message("保存设置失败，自动阅卷无法开始。", is_error=True)
+            self._show_message(
+                title="保存设置失败",
+                icon=QMessageBox.Critical,
+                summary=(
+                    "保存设置失败，自动阅卷无法开始。\n\n"
+                    "常见原因：\n"
+                    "1）Excel（阅卷记录）还开着，导致文件被占用\n"
+                    "2）软件所在文件夹没有写入权限\n\n"
+                    "建议：先关闭所有Excel文件；把软件放到桌面或D盘；再点一次“开始自动阅卷”。"
+                ),
+            )
             return
         self.log_message("所有配置已成功保存。")
 
         # 显示提醒对话框
         msg_box = QMessageBox(self)
         msg_box.setIcon(QMessageBox.Warning)
-        msg_box.setWindowTitle("重要提醒")
-        msg_box.setText("AI阅卷时，务必关闭阅卷记录文件，否则阅卷记录无法被记录。\n\n请确认您已关闭Excel文件。")
-        ok_button = msg_box.addButton("我确认阅卷记录Excel文件已关闭，开始自动阅卷", QMessageBox.AcceptRole)
+        msg_box.setWindowTitle("开始前请确认")
+        msg_box.setText(
+            "开始自动阅卷前，请先把所有Excel表格关闭。\n"
+            "（尤其是‘阅卷记录’相关的Excel文件）\n\n"
+            "否则：可能保存不了阅卷记录，甚至中途报错。"
+        )
+        ok_button = msg_box.addButton("我已关闭Excel，开始自动阅卷", QMessageBox.AcceptRole)
+        cancel_button = msg_box.addButton("取消", QMessageBox.RejectRole)
         msg_box.setDefaultButton(ok_button)
-        msg_box.exec_()
+        msg_box.setSizeGripEnabled(True)
+        msg_box.setMinimumSize(680, 260)
+        msg_box.setStyleSheet("QLabel{min-width: 560px;}")
+        result = msg_box.exec_()
 
-        # 用户确认后，直接启动自动阅卷（无延迟）
-        self._start_auto_evaluation_after_confirmation()
+        # 检查用户是否点击了"开始自动阅卷"按钮（而不是点击X或取消）
+        if msg_box.clickedButton() == ok_button:
+            # 用户确认后，直接启动自动阅卷（无延迟）
+            self._start_auto_evaluation_after_confirmation()
+        else:
+            # 用户点击了取消或X关闭窗口
+            self.log_message("用户取消了自动阅卷操作")
+            return
 
     def _start_auto_evaluation_after_confirmation(self):
         """用户确认后延迟启动自动阅卷"""
@@ -462,8 +722,13 @@ class MainWindow(QMainWindow):
             self.log_message(f"自动阅卷已启动: 批改 {questions_str}，循环 {params['cycle_number']} 次")
 
         except Exception as e:
-            self.log_message(f"启动自动阅卷出错: {e}", is_error=True)
-            traceback.print_exc()
+            detail = traceback.format_exc()
+            summary, _ = self._simplify_message_for_teacher(str(e))
+            log_path = self._write_debug_log("start_run", detail)
+            if log_path:
+                summary += f"\n（已保存日志：{log_path.name}）"
+            self.log_message("启动自动阅卷失败。" + summary, is_error=True)
+            self._show_message("启动失败", summary, icon=QMessageBox.Critical, detail=detail)
 
     def check_required_settings(self):
         """检查必要的设置是否已配置"""
@@ -491,27 +756,27 @@ class MainWindow(QMainWindow):
         # --- AI供应商配置：允许用户UI文本，但启动前必须能解析为内部ID ---
         first_provider_id = _resolve_provider_to_id(getattr(self.config_manager, 'first_api_provider', ''))
         if not first_provider_id:
-            errors.append("请为第一组API选择一个有效的供应商")
+            errors.append("第一组：请选择一个AI平台（下拉框里选）")
         else:
             # 写回内存，确保后续保存会落盘为内部ID
             self.config_manager.update_config_in_memory('first_api_provider', first_provider_id)
 
         if not self.config_manager.first_api_key.strip():
-            errors.append("第一组API的密钥不能为空")
+            errors.append("第一组：密钥不能为空（在平台后台复制粘贴）")
         if not self.config_manager.first_modelID.strip():
-            errors.append("第一组API的模型ID不能为空")
+            errors.append("第一组：模型ID不能为空（例如模型名称/ID）")
 
         # 始终要求配置第二组API（用于故障转移）
         second_provider_id = _resolve_provider_to_id(getattr(self.config_manager, 'second_api_provider', ''))
         if not second_provider_id:
-            errors.append("请为第二组API选择一个有效的供应商（用于API故障转移）")
+            errors.append("第二组：请选择一个AI平台（用于备用/故障切换）")
         else:
             self.config_manager.update_config_in_memory('second_api_provider', second_provider_id)
 
         if not self.config_manager.second_api_key.strip():
-            errors.append("第二组API的密钥不能为空（用于API故障转移）")
+            errors.append("第二组：密钥不能为空（用于备用/故障切换）")
         if not self.config_manager.second_modelID.strip():
-            errors.append("第二组API的模型ID不能为空（用于API故障转移）")
+            errors.append("第二组：模型ID不能为空（用于备用/故障切换）")
 
         # 检查所有启用的题目的评分细则、答案区域、以及必要坐标（分数输入/确认按钮/三步输入）
         enabled_questions = self.config_manager.get_enabled_questions()
@@ -549,10 +814,10 @@ class MainWindow(QMainWindow):
 
         if errors:
             # --- 优化错误提示 ---
-            title = "启动前请完善配置"
-            intro = "自动阅卷无法启动，因为缺少以下必要信息：\n"
+            title = "还差几项设置，先补齐"
+            intro = "自动阅卷现在不能开始，请按下面清单补齐：\n"
             error_details = "\n".join([f"  - {e}" for e in errors])
-            final_message = f"{intro}\n{error_details}\n\n请在主界面补充完整后再试。"
+            final_message = f"{intro}\n{error_details}\n\n补齐后，再点一次“开始自动阅卷”。"
 
             # 创建完整显示的错误提示框
             msg_box = QMessageBox(self)
@@ -567,79 +832,6 @@ class MainWindow(QMainWindow):
             return False
         return True
 
-    def check_excel_files_available(self):
-        """检查阅卷记录Excel文件是否可用（未被锁定且无临时文件）"""
-        try:
-            # 获取当前配置
-            dual_evaluation = self.config_manager.dual_evaluation_enabled
-            question_config = self.config_manager.get_question_config(1)  # 单题模式只处理第一题
-            full_score = question_config.get('max_score', 100) if question_config else 100
-
-            # 手动构建文件路径（避免使用_get_excel_filepath的复杂逻辑）
-            now = datetime.datetime.now()
-            date_str = now.strftime('%Y年%m月%d日')
-            evaluation_type = '双评' if dual_evaluation else '单评'
-            excel_filename = f"此题最高{full_score}分_{evaluation_type}.xlsx"
-
-            if getattr(sys, 'frozen', False):
-                base_dir = pathlib.Path(sys.executable).parent
-            else:
-                base_dir = pathlib.Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-            record_dir = base_dir / "阅卷记录"
-            date_dir = record_dir / date_str
-            excel_filepath = date_dir / excel_filename
-
-            # 检查是否存在Excel临时文件（表示文件正在被打开）
-            temp_file = date_dir / f"~${excel_filename}"
-            if temp_file.exists():
-                # 显示提醒对话框
-                from PyQt5.QtWidgets import QMessageBox
-                msg_box = QMessageBox(self)
-                msg_box.setIcon(QMessageBox.Warning)
-                msg_box.setWindowTitle("无法开始阅卷")
-                msg_box.setText("检测到阅卷记录文件正在被其他程序打开。\n\n请关闭Excel文件，然后自动阅卷才能正常进行。")
-                msg_box.setStandardButtons(QMessageBox.Ok)
-                msg_box.exec_()
-                return False
-
-            # 检查文件是否被锁定
-            if excel_filepath.exists() and self.is_file_locked(excel_filepath):
-                # 显示提醒对话框
-                from PyQt5.QtWidgets import QMessageBox
-                msg_box = QMessageBox(self)
-                msg_box.setIcon(QMessageBox.Warning)
-                msg_box.setWindowTitle("无法开始阅卷")
-                msg_box.setText("阅卷记录文件被锁定，请关闭相关程序后重试。")
-                msg_box.setStandardButtons(QMessageBox.Ok)
-                msg_box.exec_()
-                return False
-
-            return True
-
-        except Exception as e:
-            # 显示友好的错误提示
-            from PyQt5.QtWidgets import QMessageBox
-            msg_box = QMessageBox(self)
-            msg_box.setIcon(QMessageBox.Warning)
-            msg_box.setWindowTitle("检查文件状态失败")
-            msg_box.setText("请关闭阅卷记录文件，然后才能正常启动自动阅卷。")
-            msg_box.setStandardButtons(QMessageBox.Ok)
-            msg_box.exec_()
-            self.log_message(f"检查Excel文件可用性时出错: {str(e)}", is_error=True)
-            return False
-
-    def is_file_locked(self, filepath):
-        """检查文件是否被锁定（主要因被其他进程打开）"""
-        try:
-            with open(filepath, 'a'):
-                pass
-            return False
-        except PermissionError:
-            return True
-        except Exception:
-            return False
-    
     def test_api_connections(self):
         """测试API连接（强制测试两个API）"""
         try:
@@ -651,9 +843,11 @@ class MainWindow(QMainWindow):
             self.log_message("正在测试第二个API...")
             success2, message2 = self.api_service.test_api_connection("second")
             
+            s1, d1 = self._simplify_message_for_teacher(message1)
+            s2, d2 = self._simplify_message_for_teacher(message2)
             result_message = (
-                f"【第一个API】\n{message1}\n\n"
-                f"【第二个API】\n{message2}"
+                f"【第一组AI平台】\n{s1}\n\n"
+                f"【第二组AI平台】\n{s2}"
             )
             
             if success1 and success2: 
@@ -662,27 +856,23 @@ class MainWindow(QMainWindow):
                 self.log_message("测试完成：部分API无法正常使用", is_error=True)
 
             # 创建完整显示的API测试结果提示框
-            msg_box = QMessageBox(self)
-            msg_box.setIcon(QMessageBox.Information if (success1 and success2) else QMessageBox.Warning)
-            msg_box.setWindowTitle("API连接测试")
-            msg_box.setText(f"{result_message}")
-            msg_box.setSizeGripEnabled(True)
-            msg_box.setMinimumSize(600, 300)
-            msg_box.setStyleSheet("QLabel{min-width: 500px;}")
-            msg_box.setStandardButtons(QMessageBox.Ok)
-            msg_box.exec_()
+            details = "\n\n".join([
+                "[第一组-原始信息]",
+                d1,
+                "\n[第二组-原始信息]",
+                d2,
+            ]).strip()
+            self._show_message(
+                title="AI平台连接测试",
+                icon=QMessageBox.Information if (success1 and success2) else QMessageBox.Warning,
+                summary=result_message,
+                detail=details,
+            )
         except Exception as e:
-            self.log_message(f"API测试出错: {str(e)}", is_error=True)
-            # 创建完整显示的API测试错误提示框
-            msg_box = QMessageBox(self)
-            msg_box.setIcon(QMessageBox.Critical)
-            msg_box.setWindowTitle("API测试错误")
-            msg_box.setText(f"测试过程中发生错误。\n\n错误详情:\n{str(e)}")
-            msg_box.setSizeGripEnabled(True)
-            msg_box.setMinimumSize(500, 200)
-            msg_box.setStyleSheet("QLabel{min-width: 400px;}")
-            msg_box.setStandardButtons(QMessageBox.Ok)
-            msg_box.exec_()
+            detail = traceback.format_exc()
+            summary, _ = self._simplify_message_for_teacher(str(e))
+            self.log_message("AI平台连接测试失败：" + summary, is_error=True)
+            self._show_message("AI平台连接测试失败", summary, icon=QMessageBox.Critical, detail=detail)
 
     def closeEvent(self, a0: Optional[QCloseEvent]) -> None:
         """窗口关闭事件（优化版）"""
@@ -704,10 +894,10 @@ class MainWindow(QMainWindow):
                 self.log_message("一个答案窗口在主窗口关闭前已被销毁，跳过关闭操作。")
                 pass
 
-        # 循环结束后，清空字典，确保所有（可能无效的）引用都被清除
+        # 循环结束后，清空字典
         self.answer_windows.clear()
 
-        # --- 保存配置的逻辑保持不变 ---
+        # 保存配置
         self.log_message("尝试在关闭程序前保存所有配置...")
         if not self.config_manager.save_all_configs_to_file():
             self.log_message("警告：关闭程序前保存配置失败。", is_error=True)
@@ -717,11 +907,6 @@ class MainWindow(QMainWindow):
         if a0:
             a0.accept()
 
-    # --- 以下是其他未发生重大逻辑变化的函数，保持原样 ---
-    # ... (包括 on_dual_evaluation_changed, _apply_ui_constraints, on_worker_finished, get_ui_element, 等等) ...
-    # ... 请将您原文件中的这些函数复制到这里 ...
-    # 为了完整性，我将提供这些函数的简化版或完整版
-    
     def on_dual_evaluation_changed(self, state):
         if self._is_initializing: return
         is_enabled = bool(state)
@@ -835,43 +1020,75 @@ class MainWindow(QMainWindow):
             is_error: 是否为错误消息（向后兼容）
             level: 日志级别 (INFO, DETAIL, RESULT, ERROR)
         """
+        # 兼容：worker 发来的第二个参数在多数情况下表示“重要/需要展示”
+        is_important = bool(is_error)
+
         # 自动确定级别（向后兼容）
         if level is None:
             level = self.LOG_LEVEL_ERROR if is_error else self.LOG_LEVEL_INFO
 
-        # 日志过滤：只显示RESULT和ERROR级别的消息
-        if level not in [self.LOG_LEVEL_RESULT, self.LOG_LEVEL_ERROR]:
+        # 日志过滤：始终显示 RESULT/ERROR；INFO/WARNING 仅显示重要消息；DETAIL/DEBUG 不显示
+        level_upper = str(level).upper()
+        if level_upper in ["DETAIL", "DEBUG"]:
+            return
+        if level_upper not in ["ERROR", "RESULT"] and not is_important:
+            return
+
+        # 统一做去噪
+        message = self._normalize_log_text(str(message), preserve_newlines=(level_upper == "RESULT"))
+        if not message:
             return
 
         log_widget = self.get_ui_element('log_text')
         if log_widget:
-            if level == self.LOG_LEVEL_ERROR:
+            if level_upper == "ERROR":
                 color = "red"
                 prefix = "[错误]"
-            elif level == self.LOG_LEVEL_RESULT:
+            elif level_upper == "RESULT":
                 color = "black"
+                # RESULT默认标题
                 prefix = "【AI评分依据】"
-                # 如果消息以"AI评分依据:"开头，去掉这个前缀
+
+                # 兼容旧格式：如果消息以"AI评分依据:"开头，去掉这个前缀
                 if message.startswith("AI评分依据:"):
                     message = message[len("AI评分依据:"):].strip()
+
+                # 新格式：如果第一行是【总分 xx 分 - AI评分依据如下】，则将其作为标题
+                # 其余行作为正文，避免 UI 出现重复标题块。
+                first_line, sep, rest = message.partition("\n")
+                if first_line.strip().startswith("【总分") and first_line.strip().endswith("】"):
+                    prefix = first_line.strip()
+                    message = rest.strip() if sep else ""
             else:
                 color = "blue"
-                prefix = "[信息]"
+                prefix = "[信息]" if level_upper == "INFO" else "[提示]"
 
-            # 处理消息内容，添加换行以提高可读性
-            formatted_message = message.replace("；", "；<br>")
+            # 处理消息内容：HTML转义 + 规范换行
+            formatted_message = self._escape_html(message)
+            formatted_message = formatted_message.replace("\r\n", "\n").replace("\r", "\n")
+            formatted_message = formatted_message.replace("\n", "<br>")
+            formatted_message = formatted_message.replace("；", "；<br>")
             
             # AI评分依据另起一行显示，增加空行提高视觉舒适度
             log_widget.append(f'<span style="color:{color}; font-size:14pt;">{prefix}<br>{formatted_message}</span><br>')
 
         # 控制台始终输出所有消息
-        print(f"[{level}] {message}")
+        print(f"[{level_upper}] {message}")
 
     def on_worker_finished(self):
         self.update_ui_state(is_running=False)
     
     def on_worker_error(self, error_message):
-        self.log_message(f"任务中断: {error_message}", is_error=True)
+        summary, detail = self._simplify_message_for_teacher(str(error_message))
+        if detail and detail != summary:
+            self._write_debug_log("worker_error", detail)
+
+        # 用户手动停止：用信息级别，不走错误模板
+        if "已停止（用户手动停止" in summary:
+            self.log_message(summary, True, "INFO")
+        else:
+            self.log_message(summary, True, "ERROR")
+
         self.update_ui_state(is_running=False)
         
     def update_ui_state(self, is_running):
@@ -904,12 +1121,11 @@ class MainWindow(QMainWindow):
     def stop_auto_thread(self):
         if self.worker.isRunning():
             self.worker.stop()
-            self.log_message("已发送停止请求至自动阅卷线程。")
+            # 重要信息：让用户确认“确实停了”
+            self.log_message("已停止（用户手动停止）。", True, "INFO")
         else:
-            self.update_ui_state(is_running=False) # 确保UI状态正确
+            self.update_ui_state(is_running=False)
 
-    # ... 其他如 get_ui_element, open_question_config_dialog 等函数保持原样 ...
-    # 您可以将原文件中的这些函数直接复制过来
     def get_ui_element(self, element_name: str, element_type=None) -> Optional[QWidget]:
         """获取UI元素，支持类型提示
         
@@ -1024,18 +1240,12 @@ class MainWindow(QMainWindow):
         except Exception:
             return default_value
     
-    # ... 您原有的其他辅助函数，如 connect_signals, setup_* 系列函数 ...
-    # 这些函数的内部逻辑基本不需要大改，因为它们大多是连接信号或设置简单的UI属性
-    # 我在这里提供简化版，您可以与您的版本对比
     def connect_signals(self):
         """连接所有UI信号的公开接口"""
         self._connect_signals()
 
     def setup_question_selector(self):
-        # from PyQt5.QtWidgets import QButtonGroup
-        # self.question_button_group = QButtonGroup(self)
-        # self.question_button_group.buttonClicked.connect(self.on_question_changed)
-        pass # 假设UI文件已自动连接
+        pass  # UI文件已自动连接
 
     def on_question_changed(self, button): pass
 
@@ -1134,10 +1344,3 @@ class MainWindow(QMainWindow):
             self.log_message(f"第{question_index}题步长更新为: {step_value}")
         except (ValueError, TypeError):
             pass  # 忽略无效的步长值
-    
-    
-
-
-
-# --- END OF FILE main_window.py ---
-

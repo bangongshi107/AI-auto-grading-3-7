@@ -121,7 +121,7 @@ class BusinessError(GradingError):
                  original_error: Optional[Exception] = None):
         # 根据错误类型设置恢复建议
         recovery_map = {
-            self.TYPE_SCORE_PARSE: "AI返回的分数格式无效，请检查Prompt设置或手动评分",
+            self.TYPE_SCORE_PARSE: "AI返回的分数格式无效，请检查评分细则或手动评分",
             self.TYPE_SCORE_RANGE: "分数已自动修正到有效范围",
             self.TYPE_AREA_INVALID: "请重新配置答案区域",
             self.TYPE_API_RESPONSE: "API响应格式异常，可能需要更换模型",
@@ -936,7 +936,6 @@ class GradingThread(QThread):
         else:
             self.log_signal.emit(f"未知的题目类型: '{question_type}'，将使用默认的按点给分主观题Prompt。", True, "WARNING")
             return self._build_subjective_pointbased_prompt(standard_answer)
-    # --- 结束新增的Prompt构建方法 ---
 
     def _is_unrecognizable_answer(self, student_answer_summary, itemized_scores):
         """
@@ -1056,7 +1055,15 @@ class GradingThread(QThread):
         # 如果reason是GradingError实例，提取信息
         if isinstance(reason, GradingError):
             error = reason
-            reason = ErrorRecoveryManager.format_error_message(error)
+            include_recovery = True
+            try:
+                msg = (getattr(error, 'message', '') or '').strip()
+                if isinstance(error, BusinessError) and any(k in msg for k in ["异常试卷", "人工介入", "需人工介入", "需要人工介入"]):
+                    include_recovery = False
+            except Exception:
+                include_recovery = True
+
+            reason = ErrorRecoveryManager.format_error_message(error, include_recovery=include_recovery)
         
         # 获取恢复策略
         if error:
@@ -1065,8 +1072,8 @@ class GradingThread(QThread):
         else:
             log_level = 'ERROR'
         
-        # 准备信号参数（在锁外准备，避免在锁内执行复杂操作）
-        log_msg = f"错误: {reason}"
+        # 简化：直接使用原始错误消息，不添加额外前缀
+        log_msg = str(reason)
         
         with self._state_lock:
             self.completion_status = "error"
@@ -1169,9 +1176,9 @@ class GradingThread(QThread):
             score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response = eval_result
 
         if score is None:
-            self.log_signal.emit(f"第 {question_index} 题评分失败", True, "ERROR")
+            # 简化：只在_set_error_state中记录一次错误
             self._set_error_state(
-                BusinessError(f"第 {question_index} 题评分失败，需手动处理",
+                BusinessError(f"第 {question_index} 题评分失败",
                              BusinessError.TYPE_SCORE_PARSE, question_index=question_index)
             )
             return False
@@ -1263,7 +1270,6 @@ class GradingThread(QThread):
         else:
             # 未启用异常卷按钮或未配置坐标：停止阅卷，等待人工介入
             error_msg = f"题目 {question_index} 检测到异常试卷 ({anomaly_msg})，但未启用异常卷按钮，需要人工介入"
-            self.log_signal.emit(error_msg, True, "ERROR")
             
             # 发出人工介入信号
             self.manual_intervention_signal.emit(
@@ -1940,36 +1946,30 @@ class GradingThread(QThread):
             # 失败：记录错误
             last_error = error
             
-            self.log_signal.emit(
-                f"{api_name}调用失败: {error}", 
-                True, "WARNING"
-            )
+            # 简化日志：只在第一个API失败时记录
+            if len(attempted_apis) == 1:
+                self.log_signal.emit(f"{api_name}失败，切换到备用API", False, "INFO")
             
             # 检查是否已经尝试过所有API
             if other_api in attempted_apis:
                 # 两个API都已尝试过且都失败
                 break
             
-            # 切换到另一个API
-            self.log_signal.emit(
-                f"切换到{api_configs[other_api]['name']}...", 
-                False, "INFO"
-            )
             self.current_api = other_api
         
         # 两个API都失败了，请求人工介入
-        error_msg = f"两个API均调用失败，需要人工介入。\n最后错误: {last_error}"
-        self.log_signal.emit(error_msg, True, "ERROR")
+        # 简化：只输出最核心的错误信息
+        self.log_signal.emit("两个AI接口均失败，请检查网络或密钥配置", True, "ERROR")
         
-        # 发出人工介入信号
+        # 发出人工介入信号（简化消息）
         self.manual_intervention_signal.emit(
-            "两个API均无法正常工作，自动阅卷无法继续",
-            f"最后错误: {last_error}"
+            "两个AI接口均失败",
+            f"请检查: 1)网络连接 2)API密钥 3)模型ID"
         )
         
         # 设置错误状态并停止
-        self._set_error_state(error_msg)
-        return None, error_msg, None, None, ""
+        self._set_error_state("两个AI接口均失败")
+        return None, "两个AI接口均失败", None, None, ""
 
 
     def _call_and_process_single_api(self, api_call_func, img_str, prompt, q_config, api_name="API", max_retries=2):
@@ -1989,13 +1989,11 @@ class GradingThread(QThread):
         """
         # 内部实现：单次API调用及响应处理
         def _do_api_call_and_process():
-            self.log_signal.emit(f"正在调用{api_name}进行评分...", False, "DETAIL")
             response_text, error_from_call = api_call_func(img_str, prompt)
 
             if error_from_call or not response_text:
-                error_msg = f"{api_name}调用失败或响应为空: {error_from_call}"
-                # 抛出异常供重试机制处理
-                raise RuntimeError(error_msg)
+                # 简化：只抛出异常，不记录日志（由外层统一处理）
+                raise RuntimeError(error_from_call if error_from_call else "响应为空")
 
             success, result_data = self.process_api_response((response_text, None), q_config)
 
@@ -2027,7 +2025,6 @@ class GradingThread(QThread):
                 if is_anomaly_paper:
                     error_msg = error_info.get('message') if isinstance(error_info, dict) else str(error_info)
                     raw_feedback = error_info.get('raw_feedback', '') if isinstance(error_info, dict) else ''
-                    self.log_signal.emit(f"{api_name}检测到异常试卷: {error_msg}", True, "WARNING")
                     # 返回带有异常试卷标记的结果，供上层处理
                     return None, None, None, None, response_text, {'anomaly_paper': True, 'message': error_msg, 'raw_feedback': raw_feedback}
 
@@ -2181,28 +2178,19 @@ class GradingThread(QThread):
             itemized_scores_from_json = data.get("itemized_scores")
             confidence_data = {}  # 置信度功能暂时停用
 
-            if student_answer_summary:
-                self.log_signal.emit(f"AI提取的学生答案摘要: {student_answer_summary}", False, "RESULT")
-            else:
-                self.log_signal.emit(f"AI提取的学生答案摘要为空。", True, "WARNING")
-            self.log_signal.emit(f"AI评分依据: {scoring_basis}", False, "RESULT")
+            # UI展示优化：不在这里直接输出“答案摘要/评分依据”。
+            # 原因：此时还未完成分数计算，且分开输出会导致 UI 出现多个【AI评分依据】块。
+            # 最终会在分数计算完成后，以“【总分 xx 分 - AI评分依据如下】+明细”合并输出一次。
 
             # 【优先检查】AI是否明确请求人工介入（必须在"无法识别"检查之前，以保证人工介入信号优先级最高）
             manual_msg = self._detect_manual_intervention_feedback(student_answer_summary, scoring_basis)
             if manual_msg:
-                error_msg = f"检测到AI请求人工介入: {manual_msg}"
-                self.log_signal.emit(error_msg, True, "ERROR")
-                self.log_signal.emit(f"[调试] 人工介入信息 - student_answer_summary: {student_answer_summary[:100] if student_answer_summary else '(空)'}", False, "DEBUG")
-                self.log_signal.emit(f"[调试] 人工介入信息 - scoring_basis: {scoring_basis[:200] if scoring_basis else '(空)'}", False, "DEBUG")
+                # 简化：只记录关键信息，不重复输出
+                self.log_signal.emit(f"AI请求人工介入: {manual_msg}", True, "ERROR")
                 display_text = student_answer_summary if student_answer_summary else ""
-                try:
-                    self.log_signal.emit(f"[调试] 正在发送人工介入信号，message: {error_msg}, display_text长度: {len(display_text)}", False, "DEBUG")
-                    self.manual_intervention_signal.emit(error_msg, display_text)
-                    self.log_signal.emit(f"[调试] 人工介入信号发送成功", False, "DEBUG")
-                except Exception as e:
-                    self.log_signal.emit(f"[警告] 发送人工介入信号失败: {e}", True, "WARNING")
+                self.manual_intervention_signal.emit(manual_msg, display_text)
                 # 返回带有标记的结构，便于上层立即停止且不重试；raw_feedback 同样使用 display_text
-                return False, {'manual_intervention': True, 'message': error_msg, 'raw_feedback': display_text}
+                return False, {'manual_intervention': True, 'message': manual_msg, 'raw_feedback': display_text}
 
             # 【异常试卷检测】检测AI回复中是否包含"异常试卷"等关键词
             anomaly_msg = self._detect_anomaly_paper_feedback(student_answer_summary, scoring_basis)
@@ -2259,6 +2247,12 @@ class GradingThread(QThread):
             if final_score is None:
                 error_msg = "分数校验失败或超出范围"
                 return False, error_msg
+
+            # 合并展示：总分 + 评分依据（首行作为UI标题）
+            header = f"【总分 {final_score} 分 - AI评分依据如下】"
+            basis_text = scoring_basis.strip() if isinstance(scoring_basis, str) else str(scoring_basis)
+            display_text = f"{header}\n{basis_text}" if basis_text else header
+            self.log_signal.emit(display_text, False, "RESULT")
 
             reasoning_tuple = (student_answer_summary, data.get("scoring_basis", "未能提取评分依据"))
 
@@ -2571,16 +2565,6 @@ class GradingThread(QThread):
             return None
         except Exception:
             return None
-
-    def extract_reasoning(self, text):
-        """
-        此方法在新JSON Prompt方案下已不再直接使用。
-        学生答案摘要和评分依据将从API返回的JSON中直接提取。
-        保留此方法占位或用于旧逻辑兼容性（如果需要）。
-        """
-        # self.log_signal.emit("extract_reasoning被调用，但在新JSON方案下应通过JSON解析获取。", True)
-        # return "（通过JSON获取学生答案摘要）", "（通过JSON获取评分依据）"
-        pass # 或者直接返回None, None，或引发一个NotImplementedError
 
     def _perform_single_input(self, score_value, input_pos):
         """执行单次分数输入操作"""

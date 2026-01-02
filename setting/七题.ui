@@ -473,7 +473,7 @@ QScrollBar::sub-line:horizontal {
              <bool>true</bool>
             </property>
             <property name="toolTip">
-             <string>启用后，AI失败时不直接停止，而是不断发起AI阅卷尝试，直至失败10次后停止</string>
+             <string>不启用，则AI失败时程序立即停止；启用后，AI失败时不停继续尝试</string>
             </property>
             <property name="text">
              <string>无人模式      </string>
