@@ -7,7 +7,7 @@ import pathlib
 import traceback
 from typing import Union, Optional, Type, TypeVar, cast
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QMessageBox, QDialog,
-                             QComboBox, QLineEdit, QCheckBox, QSpinBox,
+                             QComboBox, QLineEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
                              QPlainTextEdit, QApplication, QShortcut, QLabel, QPushButton)
 from PyQt5.QtCore import Qt, pyqtSignal, QEvent, QObject
 from PyQt5.QtGui import QKeySequence, QFont, QKeyEvent, QCloseEvent
@@ -82,6 +82,12 @@ class MainWindow(QMainWindow):
         self.config_manager.update_config_in_memory(field_name, value)
         self.log_message(f"配置项 '{field_name}' 更新为: {value}")
     
+    def handle_doubleSpinBox_save(self, field_name, value):
+        """处理 QDoubleSpinBox 控件的保存"""
+        if self._is_initializing: return
+        self.config_manager.update_config_in_memory(field_name, value)
+        self.log_message(f"配置项 '{field_name}' 更新为: {value}")
+    
     # --- 统一的 ComboBox 处理函数 ---
     def handle_comboBox_save(self, combo_box_name, ui_text):
         """统一的ComboBox保存处理
@@ -132,12 +138,19 @@ class MainWindow(QMainWindow):
                 )
 
         # 其他控件的信号连接保持不变...
-        for field, w_type in [('cycle_number', QSpinBox), ('wait_time', QSpinBox)]:
-            widget = self.get_ui_element(field, w_type)
-            if widget:
-                widget.valueChanged.connect(
-                    lambda val, f=field: self.handle_spinBox_save(f, val)
-                )
+        # cycle_number 使用 QSpinBox
+        cycle_widget = self.get_ui_element('cycle_number', QSpinBox)
+        if cycle_widget:
+            cycle_widget.valueChanged.connect(
+                lambda val: self.handle_spinBox_save('cycle_number', val)
+            )
+        
+        # wait_time 使用 QDoubleSpinBox
+        wait_widget = self.get_ui_element('wait_time', QDoubleSpinBox)
+        if wait_widget:
+            wait_widget.valueChanged.connect(
+                lambda val: self.handle_doubleSpinBox_save('wait_time', val)
+            )
 
         for i in range(1, self.max_questions + 1):
             std_answer_widget = self.get_ui_element(f'StandardAnswer_text_{i}', QPlainTextEdit)
@@ -260,8 +273,8 @@ class MainWindow(QMainWindow):
             if cycle_element and isinstance(cycle_element, QSpinBox):
                 cycle_element.setValue(self.config_manager.cycle_number)
             
-            wait_element = self.get_ui_element('wait_time')
-            if wait_element and isinstance(wait_element, QSpinBox):
+            wait_element = self.get_ui_element('wait_time', QDoubleSpinBox)
+            if wait_element and isinstance(wait_element, QDoubleSpinBox):
                 wait_element.setValue(self.config_manager.wait_time)
 
             dual_element = self.get_ui_element('dual_evaluation_enabled', QCheckBox)

@@ -60,7 +60,7 @@ class ConfigManager:
         
         self.subject = ""
         self.cycle_number = 1
-        self.wait_time = 2
+        self.wait_time = 1.5  # 等待时间（支持小数，默认1.5秒）
         self.api_reset_interval = 30  # API重置间隔（默认30秒）
         self.score_rounding_step = 0.5  # 分数步长（默认0.5）
         
@@ -132,7 +132,7 @@ class ConfigManager:
         
         self.subject = self._get_config_safe('UI', 'subject', "")
         self.cycle_number = self._get_config_safe('Auto', 'cycle_number', 1, int)
-        self.wait_time = self._get_config_safe('Auto', 'wait_time', 2, int)
+        self.wait_time = float(self._get_config_safe('Auto', 'wait_time', '1.5'))
         self.api_reset_interval = self._get_config_safe('Auto', 'api_reset_interval', 30, int)
         self.score_rounding_step = float(self._get_config_safe('Settings', 'score_rounding_step', '0.5'))
         
@@ -254,7 +254,13 @@ class ConfigManager:
         elif field_name == 'second_modelID': self.second_modelID = str(value) if value else ""
         elif field_name == 'subject': self.subject = str(value) if value else ""
         elif field_name == 'cycle_number': self.cycle_number = max(1, int(value)) if value else 1
-        elif field_name == 'wait_time': self.wait_time = max(2, int(value)) if value else 2
+        elif field_name == 'wait_time': 
+            # 支持小数点，范围 0.1-9.9
+            try:
+                wait_val = float(value) if value else 1.5
+                self.wait_time = max(0.1, min(9.9, wait_val))
+            except (ValueError, TypeError):
+                self.wait_time = 1.5
         elif field_name == 'api_reset_interval': self.api_reset_interval = max(0, int(value)) if value else 30
         elif field_name == 'dual_evaluation_enabled': self.dual_evaluation_enabled = bool(value)
         elif field_name == 'score_diff_threshold': self.score_diff_threshold = max(1, int(value)) if value else 5
