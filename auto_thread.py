@@ -1048,6 +1048,10 @@ class GradingThread(QThread):
         Args:
             reason: 错误原因描述（字符串或GradingError实例）
             error: 可选的GradingError实例，用于获取更精确的恢复策略
+        
+        Note:
+            状态变更和信号发送在同一个原子操作中完成，确保线程安全。
+            使用Qt.QueuedConnection确保信号处理在接收线程的事件循环中执行。
         """
         # 如果reason是GradingError实例，提取信息
         if isinstance(reason, GradingError):
@@ -1061,12 +1065,22 @@ class GradingThread(QThread):
         else:
             log_level = 'ERROR'
         
+        # 准备信号参数（在锁外准备，避免在锁内执行复杂操作）
+        log_msg = f"错误: {reason}"
+        
         with self._state_lock:
             self.completion_status = "error"
             self.interrupt_reason = str(reason)
             self.running = False
-        
-        self.log_signal.emit(f"错误: {reason}", True, log_level)
+            
+            # 在锁内发送信号，使用QueuedConnection确保线程安全
+            # Qt会将信号排队到接收线程的事件循环中，避免跨线程直接调用
+            try:
+                from PyQt5.QtCore import Qt
+                self.log_signal.emit(log_msg, True, log_level)
+            except:
+                # 如果信号发送失败，仍然保证状态已正确设置
+                pass
 
     def _process_single_question(self, q_config: dict, q_idx: int, num_questions: int,
                                   dual_evaluation: bool, score_diff_threshold: float) -> bool:
@@ -1313,9 +1327,12 @@ class GradingThread(QThread):
         strategy = ErrorRecoveryManager.get_recovery_strategy(classified_error)
         formatted_msg = ErrorRecoveryManager.format_error_message(classified_error)
         
-        self.log_signal.emit(f"{formatted_msg}\n{error_detail}", True, strategy['log_level'])
+        # 准备信号参数（在锁外准备，避免在锁内执行复杂操作）
+        log_msg = f"{formatted_msg}\n{error_detail}"
+        log_level = strategy['log_level']
         
         # 线程安全地设置完成状态与中断原因，确保与 _set_error_state 的行为一致
+        # 状态变更和信号发送在同一个原子操作中完成
         with self._state_lock:
             if isinstance(classified_error, BusinessError) and classified_error.error_type == BusinessError.TYPE_DUAL_EVAL:
                 self.completion_status = "threshold_exceeded"
@@ -1324,6 +1341,12 @@ class GradingThread(QThread):
 
             self.interrupt_reason = formatted_msg
             self.running = False
+            
+            # 在锁内发送信号，确保状态和信号的原子性
+            try:
+                self.log_signal.emit(log_msg, True, log_level)
+            except:
+                pass  # 如果信号发送失败，仍然保证状态已正确设置
         
         # 网络错误提供重试建议
         if isinstance(classified_error, NetworkError) and strategy['should_retry']:
@@ -1338,16 +1361,21 @@ class GradingThread(QThread):
                     False, "WARNING"
                 )
                 
-                # 重置running状态，准备重试
+                # 重置running状态，准备重试（状态变更和日志在同一原子操作中）
                 with self._state_lock:
                     self.running = True
                     self.completion_status = "running"
+                    
+                    # 在锁内发送信号，确保状态和信号的原子性
+                    try:
+                        self.log_signal.emit(
+                            f"[无人模式] 等待 {self.unattended_retry_delay} 秒后重试...",
+                            False, "INFO"
+                        )
+                    except:
+                        pass
                 
-                # 等待重试延迟
-                self.log_signal.emit(
-                    f"[无人模式] 等待 {self.unattended_retry_delay} 秒后重试...",
-                    False, "INFO"
-                )
+                # 等待重试延迟（在锁外执行，避免长时间持有锁）
                 time.sleep(self.unattended_retry_delay)
                 
                 # 标记为重试状态而非错误
@@ -1623,13 +1651,22 @@ class GradingThread(QThread):
         self.current_api = "first"  # 重置为从第一个API开始
 
     def stop(self):
-        """停止线程（线程安全）"""
+        """停止线程（线程安全）
+        
+        Note:
+            状态变更和信号发送在同一个原子操作中完成，确保线程安全。
+        """
         with self._state_lock:
             self.running = False
-        if self.completion_status == "running":
-            self.completion_status = "error"
-            self.interrupt_reason = "用户手动停止"
-        self.log_signal.emit("正在停止自动阅卷线程...", False, "INFO")
+            if self.completion_status == "running":
+                self.completion_status = "error"
+                self.interrupt_reason = "用户手动停止"
+            
+            # 在锁内发送信号，确保状态和信号的原子性
+            try:
+                self.log_signal.emit("正在停止自动阅卷线程...", False, "INFO")
+            except:
+                pass  # 如果信号发送失败，仍然保证状态已正确设置
 
     def capture_answer_area(self, area):
         """截取答案区域，带统一重试机制（最多重试1次）

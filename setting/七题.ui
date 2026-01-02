@@ -614,6 +614,18 @@ QScrollBar::sub-line:horizontal {
             <property name="spacing">
              <number>3</number>
             </property>
+                        <property name="leftMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="topMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="rightMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="bottomMargin">
+                         <number>2</number>
+                        </property>
             <item>
              <layout class="QHBoxLayout" name="horizontalLayout_q1_header">
               <item>
@@ -720,6 +732,18 @@ QScrollBar::sub-line:horizontal {
             <property name="spacing">
              <number>3</number>
             </property>
+                        <property name="leftMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="topMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="rightMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="bottomMargin">
+                         <number>2</number>
+                        </property>
             <item>
              <layout class="QHBoxLayout" name="horizontalLayout_q2_header">
               <item>
@@ -794,6 +818,18 @@ QScrollBar::sub-line:horizontal {
             <property name="spacing">
              <number>3</number>
             </property>
+                        <property name="leftMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="topMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="rightMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="bottomMargin">
+                         <number>2</number>
+                        </property>
             <item>
              <layout class="QHBoxLayout" name="horizontalLayout_q3_header">
               <item>
@@ -868,6 +904,18 @@ QScrollBar::sub-line:horizontal {
             <property name="spacing">
              <number>3</number>
             </property>
+                        <property name="leftMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="topMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="rightMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="bottomMargin">
+                         <number>2</number>
+                        </property>
             <item>
              <layout class="QHBoxLayout" name="horizontalLayout_q4_header">
               <item>
@@ -942,6 +990,18 @@ QScrollBar::sub-line:horizontal {
             <property name="spacing">
              <number>3</number>
             </property>
+                        <property name="leftMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="topMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="rightMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="bottomMargin">
+                         <number>2</number>
+                        </property>
             <item>
              <layout class="QHBoxLayout" name="horizontalLayout_q5_header">
               <item>
@@ -1016,6 +1076,18 @@ QScrollBar::sub-line:horizontal {
             <property name="spacing">
              <number>3</number>
             </property>
+                        <property name="leftMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="topMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="rightMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="bottomMargin">
+                         <number>2</number>
+                        </property>
             <item>
              <layout class="QHBoxLayout" name="horizontalLayout_q6_header">
               <item>
@@ -1090,6 +1162,18 @@ QScrollBar::sub-line:horizontal {
             <property name="spacing">
              <number>3</number>
             </property>
+                        <property name="leftMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="topMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="rightMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="bottomMargin">
+                         <number>2</number>
+                        </property>
             <item>
              <layout class="QHBoxLayout" name="horizontalLayout_q7_header">
               <item>
@@ -1164,6 +1248,18 @@ QScrollBar::sub-line:horizontal {
             <property name="spacing">
              <number>3</number>
             </property>
+                        <property name="leftMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="topMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="rightMargin">
+                         <number>2</number>
+                        </property>
+                        <property name="bottomMargin">
+                         <number>2</number>
+                        </property>
             <item>
              <layout class="QHBoxLayout" name="horizontalLayout_q8_header">
               <item>

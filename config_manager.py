@@ -61,6 +61,8 @@ class ConfigManager:
         self.subject = ""
         self.cycle_number = 1
         self.wait_time = 2
+        self.api_reset_interval = 30  # API重置间隔（默认30秒）
+        self.score_rounding_step = 0.5  # 分数步长（默认0.5）
         
         self.question_configs = {}
         for i in range(1, self.max_questions + 1):
@@ -131,6 +133,8 @@ class ConfigManager:
         self.subject = self._get_config_safe('UI', 'subject', "")
         self.cycle_number = self._get_config_safe('Auto', 'cycle_number', 1, int)
         self.wait_time = self._get_config_safe('Auto', 'wait_time', 2, int)
+        self.api_reset_interval = self._get_config_safe('Auto', 'api_reset_interval', 30, int)
+        self.score_rounding_step = float(self._get_config_safe('Settings', 'score_rounding_step', '0.5'))
         
         # 不再从配置文件读取/写入 UI 字号与字体族（移除用户自行调整字号的设定）
         

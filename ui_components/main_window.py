@@ -837,12 +837,19 @@ class MainWindow(QMainWindow):
                 prefix = "[错误]"
             elif level == self.LOG_LEVEL_RESULT:
                 color = "black"
-                prefix = "[结果]"
+                prefix = "【AI评分依据】"
+                # 如果消息以"AI评分依据:"开头，去掉这个前缀
+                if message.startswith("AI评分依据:"):
+                    message = message[len("AI评分依据:"):].strip()
             else:
                 color = "blue"
                 prefix = "[信息]"
 
-            log_widget.append(f'<span style="color:{color}">{prefix} {message}</span>')
+            # 处理消息内容，添加换行以提高可读性
+            formatted_message = message.replace("；", "；<br>")
+            
+            # AI评分依据另起一行显示，增加空行提高视觉舒适度
+            log_widget.append(f'<span style="color:{color}; font-size:14pt;">{prefix}<br>{formatted_message}</span><br>')
 
         # 控制台始终输出所有消息
         print(f"[{level}] {message}")

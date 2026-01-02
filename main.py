@@ -730,16 +730,16 @@ class Application:
             rows_to_write = []
 
             if is_dual:
-                headers.extend(["API标识", "分差阈值", "学生答案摘要", "AI分项得分", "AI原始回复", "AI原始总分", "双评分差", "最终得分", "评分细则(前50字)"])
+                headers.extend(["API标识", "分差阈值", "学生答案摘要", "AI分项得分", "AI评分依据", "AI原始总分", "双评分差", "最终得分", "评分细则(前50字)"])
 
                 rubric_str = record_data.get('scoring_rubric_summary', '未配置')
                 
                 row1 = [question_index_str,
                        "API-1",
                        str(record_data.get('score_diff_threshold', "未提供")),
-                       record_data.get('api1_scoring_basis', '未提供'),
+                       record_data.get('api1_student_answer_summary', '未提供'),
                        str(record_data.get('api1_itemized_scores', [])),
-                       record_data.get('api1_raw_response', '未提供'),
+                       record_data.get('api1_scoring_basis', '未提供'),
                        str(record_data.get('api1_raw_score', 0.0)),
                        f"{record_data.get('score_difference', 0.0):.2f}",
                        final_total_score_str,
@@ -747,21 +747,21 @@ class Application:
                 row2 = [question_index_str,
                        "API-2",
                        str(record_data.get('score_diff_threshold', "未提供")),
-                       record_data.get('api2_scoring_basis', '未提供'),
+                       record_data.get('api2_student_answer_summary', '未提供'),
                        str(record_data.get('api2_itemized_scores', [])),
-                       record_data.get('api2_raw_response', '未提供'),
+                       record_data.get('api2_scoring_basis', '未提供'),
                        str(record_data.get('api2_raw_score', 0.0)),
                        f"{record_data.get('score_difference', 0.0):.2f}",
                        final_total_score_str,
                        rubric_str]
                 rows_to_write.extend([row1, row2])
             else: # 单评模式
-                headers.extend(["学生答案摘要", "AI分项得分", "AI原始回复", "最终得分", "评分细则(前50字)"])
+                headers.extend(["学生答案摘要", "AI分项得分", "AI评分依据", "最终得分", "评分细则(前50字)"])
 
                 single_row = [question_index_str,
-                             record_data.get('reasoning_basis', '无法提取'),
+                             record_data.get('student_answer', '无法提取'),
                              str(record_data.get('sub_scores', '未提供')),
-                             record_data.get('raw_ai_response', '无法提取'),
+                             record_data.get('reasoning_basis', '无法提取'),
                              final_total_score_str,
                              record_data.get('scoring_rubric_summary', '未配置')]
                 rows_to_write.append(single_row)
@@ -792,9 +792,9 @@ class Application:
                     'A': 10,  # 题目编号
                     'B': 10,  # API标识 / 学生答案摘要
                     'C': 10,  # 分差阈值 / AI分项得分
-                    'D': 80,  # 学生答案摘要（增加宽度以容纳较长的AI回答）
+                    'D': 80,  # 学生答案摘要
                     'E': 20,  # AI分项得分
-                    'F': 200, # AI原始回复（增加宽度以容纳完整的JSON回复）
+                    'F': 200, # AI评分依据（增加宽度以容纳完整的评分依据）
                     'G': 15,  # AI原始总分/最终得分
                     'H': 12,  # 双评分差
                     'I': 12,  # 最终得分
