@@ -212,13 +212,18 @@ class MainWindow(QMainWindow):
             return summary, detail
 
         if any(k in cleaned_for_parse for k in ["需人工介入", "需要人工介入", "人工介入"]):
-            # 【优化】尝试提取AI给出的具体原因（保留"需人工介入:"前缀，按原始文本展示）
+            # 【优化】尝试提取AI给出的具体原因（去掉"需人工介入:"前缀）
             reason_text = ""
             for line in cleaned_for_parse.split('\n'):
                 line = line.strip()
                 # 跳过纯标记行
-                if line in ["需人工介入", "人工介入", "需要人工介入", "[需人工介入]"]:
+                if line in ["需人工介入", "人工介入", "需要人工介入"]:
                     continue
+                # 去掉常见前缀，提取实际原因
+                for prefix in ["需人工介入:", "需人工介入：", "需要人工介入:", "需要人工介入：", "[需人工介入]"]:
+                    if line.startswith(prefix):
+                        line = line[len(prefix):].strip()
+                        break
                 if line and len(line) > 5:
                     reason_text = line
                     break
