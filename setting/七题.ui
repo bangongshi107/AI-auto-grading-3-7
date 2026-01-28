@@ -646,6 +646,48 @@ QScrollBar::sub-line:horizontal {
                </widget>
               </item>
               <item>
+               <widget class="QLabel" name="label_work_mode_1">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>      工作模式：</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="work_mode_1">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>110</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <property name="toolTip">
+                 <string>识图直评：AI看图直接评分；识评分离：AI1识别文字，AI2评分</string>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>  识图直评  </string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>  识评分离  </string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+              <item>
                <widget class="QLabel" name="label_step1">
                 <property name="sizePolicy">
                  <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
@@ -654,7 +696,7 @@ QScrollBar::sub-line:horizontal {
                  </sizepolicy>
                 </property>
                 <property name="text">
-                 <string>            步长： </string>
+                 <string>        步长： </string>
                 </property>
                </widget>
               </item>
@@ -758,6 +800,48 @@ QScrollBar::sub-line:horizontal {
                </widget>
               </item>
               <item>
+               <widget class="QLabel" name="label_work_mode_2">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>      工作模式：</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="work_mode_2">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>110</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <property name="toolTip">
+                 <string>识图直评：AI看图直接评分；识评分离：AI1识别文字，AI2评分</string>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>  识图直评  </string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>  识评分离  </string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+              <item>
                <widget class="QLabel" name="label_step2">
                 <property name="sizePolicy">
                  <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
@@ -766,7 +850,7 @@ QScrollBar::sub-line:horizontal {
                  </sizepolicy>
                 </property>
                 <property name="text">
-                 <string>  步长</string>
+                 <string>              步长</string>
                 </property>
                </widget>
               </item>
@@ -844,6 +928,48 @@ QScrollBar::sub-line:horizontal {
                </widget>
               </item>
               <item>
+               <widget class="QLabel" name="label_work_mode_3">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>      工作模式：</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="work_mode_3">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>110</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <property name="toolTip">
+                 <string>识图直评：AI看图直接评分；识评分离：AI1识别文字，AI2评分</string>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>  识图直评  </string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>  识评分离  </string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+              <item>
                <widget class="QLabel" name="label_step3">
                 <property name="sizePolicy">
                  <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
@@ -852,7 +978,7 @@ QScrollBar::sub-line:horizontal {
                  </sizepolicy>
                 </property>
                 <property name="text">
-                 <string>  步长</string>
+                 <string>        步长</string>
                 </property>
                </widget>
               </item>
@@ -930,6 +1056,48 @@ QScrollBar::sub-line:horizontal {
                </widget>
               </item>
               <item>
+               <widget class="QLabel" name="label_work_mode_4">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>      工作模式：</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="work_mode_4">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>110</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <property name="toolTip">
+                 <string>识图直评：AI看图直接评分；识评分离：AI1识别文字，AI2评分</string>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>  识图直评</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>  识评分离</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+              <item>
                <widget class="QLabel" name="label_step4">
                 <property name="sizePolicy">
                  <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
@@ -938,7 +1106,7 @@ QScrollBar::sub-line:horizontal {
                  </sizepolicy>
                 </property>
                 <property name="text">
-                 <string>  步长</string>
+                 <string>        步长</string>
                 </property>
                </widget>
               </item>
@@ -1016,6 +1184,48 @@ QScrollBar::sub-line:horizontal {
                </widget>
               </item>
               <item>
+               <widget class="QLabel" name="label_work_mode_5">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>      工作模式：</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="work_mode_5">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>110</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <property name="toolTip">
+                 <string>识图直评：AI看图直接评分；识评分离：AI1识别文字，AI2评分</string>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>  识图直评</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>  识评分离</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+              <item>
                <widget class="QLabel" name="label_step5">
                 <property name="sizePolicy">
                  <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
@@ -1024,7 +1234,7 @@ QScrollBar::sub-line:horizontal {
                  </sizepolicy>
                 </property>
                 <property name="text">
-                 <string>  步长</string>
+                 <string>        步长</string>
                 </property>
                </widget>
               </item>
@@ -1102,6 +1312,48 @@ QScrollBar::sub-line:horizontal {
                </widget>
               </item>
               <item>
+               <widget class="QLabel" name="label_work_mode_6">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>      工作模式：</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="work_mode_6">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>110</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <property name="toolTip">
+                 <string>识图直评：AI看图直接评分；识评分离：AI1识别文字，AI2评分</string>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>  识图直评</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>  识评分离</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+              <item>
                <widget class="QLabel" name="label_step6">
                 <property name="sizePolicy">
                  <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
@@ -1110,7 +1362,7 @@ QScrollBar::sub-line:horizontal {
                  </sizepolicy>
                 </property>
                 <property name="text">
-                 <string>  步长</string>
+                 <string>        步长</string>
                 </property>
                </widget>
               </item>
@@ -1188,6 +1440,48 @@ QScrollBar::sub-line:horizontal {
                </widget>
               </item>
               <item>
+               <widget class="QLabel" name="label_work_mode_7">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="text">
+                 <string>      工作模式：</string>
+                </property>
+               </widget>
+              </item>
+              <item>
+               <widget class="QComboBox" name="work_mode_7">
+                <property name="sizePolicy">
+                 <sizepolicy hsizetype="Fixed" vsizetype="Fixed">
+                  <horstretch>0</horstretch>
+                  <verstretch>0</verstretch>
+                 </sizepolicy>
+                </property>
+                <property name="minimumSize">
+                 <size>
+                  <width>110</width>
+                  <height>0</height>
+                 </size>
+                </property>
+                <property name="toolTip">
+                 <string>识图直评：AI看图直接评分；识评分离：AI1识别文字，AI2评分</string>
+                </property>
+                <item>
+                 <property name="text">
+                  <string>  识图直评</string>
+                 </property>
+                </item>
+                <item>
+                 <property name="text">
+                  <string>  识评分离</string>
+                 </property>
+                </item>
+               </widget>
+              </item>
+              <item>
                <widget class="QLabel" name="label_step7">
                 <property name="sizePolicy">
                  <sizepolicy hsizetype="Fixed" vsizetype="Preferred">
@@ -1196,7 +1490,7 @@ QScrollBar::sub-line:horizontal {
                  </sizepolicy>
                 </property>
                 <property name="text">
-                 <string>  步长</string>
+                 <string>        步长</string>
                 </property>
                </widget>
               </item>
@@ -1346,9 +1640,6 @@ QScrollBar::sub-line:horizontal {
               <horstretch>0</horstretch>
               <verstretch>0</verstretch>
              </sizepolicy>
-            </property>
-            <property name="maximumWidth">
-             <number>150</number>
             </property>
             <property name="currentIndex">
              <number>0</number>
@@ -1510,9 +1801,6 @@ QScrollBar::sub-line:horizontal {
           </item>
           <item>
            <widget class="QPushButton" name="auto_run_but">
-            <property name="minimumWidth">
-             <number>160</number>
-            </property>
             <property name="text">
              <string>运行自动改卷</string>
             </property>

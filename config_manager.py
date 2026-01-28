@@ -88,6 +88,7 @@ class ConfigManager:
                 'enable_anomaly_button': False,  # 异常卷按钮开关
                 'anomaly_button_pos': None,  # 异常卷按钮位置
                 'question_type': 'Subjective_PointBased_QA',
+                'work_mode': 'direct_grade',  # 识图直评 / 识评分离
                 'score_rounding_step': 0.5,  # 每题独立步长，默认0.5
             }
             if is_q1:
@@ -178,6 +179,9 @@ class ConfigManager:
                 'enable_anomaly_button': self._get_config_safe(section_name, 'enable_anomaly_button', False, bool),
                 'anomaly_button_pos': self._parse_position(self._get_config_safe(section_name, 'anomaly_button_pos', None)),
                 'question_type': self._get_config_safe(section_name, 'question_type', 'Subjective_PointBased_QA', str),
+                'work_mode': self._normalize_work_mode(
+                    self._get_config_safe(section_name, 'work_mode', 'direct_grade', str)
+                ),
                 'score_rounding_step': float(self._get_config_safe(section_name, 'score_rounding_step', '0.5')),  # 每题独立步长
             }
             if i == 1:
@@ -227,6 +231,20 @@ class ConfigManager:
         except Exception:
             pass
         return value
+
+    def _normalize_work_mode(self, raw_value) -> str:
+        """将配置中的工作模式标准化为内部标识。"""
+        value = str(raw_value).strip() if raw_value is not None else ""
+        if not value:
+            return "direct_grade"
+        if value in {"direct_grade", "ocr_then_grade"}:
+            return value
+        # 兼容UI文本或旧值
+        if value in {"识图直评", "直评", "直接评分"}:
+            return "direct_grade"
+        if value in {"识评分离","分离", "识别评分", "OCR评分"}:
+            return "ocr_then_grade"
+        return "direct_grade"
 
     def _get_config_safe(self, section, option, default_value, value_type: type = str):
         """安全地获取配置值"""
@@ -316,6 +334,7 @@ class ConfigManager:
         elif field_type == 'enable_anomaly_button': self.question_configs[q_index]['enable_anomaly_button'] = bool(value)
         elif field_type == 'anomaly_button_pos': self.question_configs[q_index]['anomaly_button_pos'] = value
         elif field_type == 'question_type': self.question_configs[q_index]['question_type'] = str(value) if value else 'Subjective_PointBased_QA'
+        elif field_type == 'work_mode': self.question_configs[q_index]['work_mode'] = str(value) if value else 'direct_grade'
         elif field_type == 'score_rounding_step':  # 每题独立步长
             try:
                 self.question_configs[q_index]['score_rounding_step'] = float(value) if value is not None else 0.5
@@ -388,6 +407,7 @@ class ConfigManager:
                     'enable_next_button': str(q_config['enable_next_button']),
                     'enable_anomaly_button': str(q_config.get('enable_anomaly_button', False)),
                     'question_type': q_config.get('question_type', 'Subjective_PointBased_QA'),
+                    'work_mode': q_config.get('work_mode', 'direct_grade'),
                     'score_rounding_step': str(q_config.get('score_rounding_step', 0.5)),
                     'score_input': f"{q_config['score_input_pos'][0]},{q_config['score_input_pos'][1]}" if q_config['score_input_pos'] else "",
                     'confirm_button': f"{q_config['confirm_button_pos'][0]},{q_config['confirm_button_pos'][1]}" if q_config['confirm_button_pos'] else "",

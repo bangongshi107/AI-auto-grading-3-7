@@ -845,6 +845,7 @@ class GradingThread(QThread):
         # 当一个API失败时，自动切换到另一个API继续尝试
         # 如果两个API都失败，停止阅卷并请求人工介入
         self.current_api = "first"  # 默认从第一个API开始
+        self.last_used_api = "first"  # 记录单评实际使用的API
         
         # =================================================================
         # P0修复：线程安全与并发问题
@@ -862,7 +863,7 @@ class GradingThread(QThread):
         self.unattended_max_retry_rounds = 10  # 最大重试轮数
         self._unattended_retry_count = 0  # 当前重试计数
 
-    def _get_common_system_message(self, include_evidence_bar: bool = True) -> str:
+    def _get_common_system_message(self, include_evidence_bar: bool = True, source_desc: str = "图片内容") -> str:
         """
         返回通用的AI系统提示词。
         
@@ -922,7 +923,7 @@ class GradingThread(QThread):
 
         # 组装系统消息
         base_msg = (
-            f"你是【{subject}】资深阅卷老师，严格依据图片内容和评分细则评分；划掉内容不计分。\n\n"
+            f"你是【{subject}】资深阅卷老师，严格依据{source_desc}和评分细则评分；划掉内容不计分。\n\n"
             + anti_injection
             + intervention_protocol
         )
@@ -1015,8 +1016,137 @@ class GradingThread(QThread):
         elif question_type == "Holistic_Evaluation_Open":
             return self._build_holistic_evaluation_prompt(standard_answer)
         else:
-            self.log_signal.emit(f"未知的题目类型: '{question_type}'，将使用默认的按点给分主观题Prompt。", True, "WARNING")
             return self._build_subjective_pointbased_prompt(standard_answer)
+
+    def _build_ocr_prompt(self) -> dict:
+        """构建OCR识别提示词（仅提取文字，不做判断）。"""
+        system_message = (
+            "你是专业OCR文字提取助手。你的任务仅是从图片中提取可见手写文字/符号内容，"
+            "不做任何评价或判断。"
+        )
+        user_prompt = (
+            "【任务】\n"
+            "请逐行提取图片中手写的所有可见内容，保持原文与顺序，尽量保留换行与段落。\n\n"
+            "【严格要求】\n"
+            "1) 只做文字/符号提取，不做任何解释、分析、归纳、判断。\n"
+            "2) 数学/化学/物理等符号必须原样输出，不要转为LaTeX。\n"
+            "3) 看不清的字符用[?]占位，严禁猜测补全。\n"
+            "4) 若仅有涂改/擦除痕迹、涂抹、乱涂，且无法辨认任何字符/符号，readability必须为unreadable，is_blank必须为false。\n"
+            "5) 若画面为空白或仅有无意义细微痕迹但可以确认没有可识别字符，is_blank必须为true；extracted_text可为空字符串。\n\n"
+            "【输出格式】\n"
+            "只输出JSON对象（不要代码块/解释），必须包含以下键：\n"
+            "- extracted_text: 识别出的原文（字符串，可为空）\n"
+            "- readability: clear / partial / unreadable 之一\n"
+            "- is_blank: true/false（是否为空白作答）\n"
+            "- notes: 备注（可空字符串）\n"
+        )
+        return {"system": system_message, "user": user_prompt}
+
+    def select_and_build_text_prompt(self, standard_answer: str, question_type: str, student_answer_text: str):
+        """为识评分离模式构建纯文本评分Prompt。"""
+        system_message = self._get_common_system_message(source_desc="学生答案文本")
+        student_text = student_answer_text if student_answer_text is not None else ""
+
+        base_user_prompt = (
+            "【学生答案文本】\n"
+            f"{student_text}\n\n"
+            "【评分细则】\n"
+            f"{standard_answer.strip()}\n"
+        )
+
+        if question_type == "Objective_FillInTheBlank":
+            user_prompt = (
+                "【题目类型：客观填空题】\n"
+                "- 逐空对照评分细则判定得分；若细则允许同义/近义给分，请在 scoring_basis 给出【证据】。\n\n"
+                + base_user_prompt
+            )
+        elif question_type == "Subjective_PointBased_QA":
+            user_prompt = (
+                "【题目类型：按点给分主观题】\n"
+                "- 逐点对照评分细则判定并给分；每点在 scoring_basis 给出【证据】，禁止凭印象补全。\n\n"
+                + base_user_prompt
+            )
+        elif question_type == "Formula_Proof_StepBased":
+            user_prompt = (
+                "【题目类型：公式计算/证明题】\n"
+                "- 按评分细则的步骤/采分点核对：公式、代入、计算/推理、符号等；证据不足、无法评分就触发人工介入协议。\n\n"
+                + base_user_prompt
+            )
+        elif question_type == "Holistic_Evaluation_Open":
+            system_message = self._get_common_system_message(include_evidence_bar=False, source_desc="学生答案文本")
+            user_prompt = (
+                "【题目类型：整体评估开放题】\n"
+                "- 仅依据评分细则和学生答案给出总分；在 scoring_basis 说明评分理由。\n\n"
+                + base_user_prompt
+            )
+        else:
+            user_prompt = (
+                "【题目类型：按点给分主观题】\n"
+                "- 逐点对照评分细则判定并给分；每点在 scoring_basis 给出【证据】，禁止凭印象补全。\n\n"
+                + base_user_prompt
+            )
+
+        return {"system": system_message, "user": user_prompt}
+
+    def _process_ocr_response(self, response_text: str):
+        """解析OCR响应JSON。"""
+        try:
+            data = None
+            try:
+                data = json.loads(response_text)
+            except json.JSONDecodeError:
+                extracted_json = self._extract_json_from_text(response_text)
+                if extracted_json:
+                    data = json.loads(extracted_json)
+
+            if data is None:
+                raise json.JSONDecodeError("无法解析响应为JSON", response_text, 0)
+
+            for field in ["extracted_text", "readability", "is_blank", "notes"]:
+                if field not in data:
+                    raise KeyError(f"缺少字段: {field}")
+
+            extracted_text = data.get("extracted_text", "")
+            readability = str(data.get("readability", "")).lower().strip()
+            is_blank = bool(data.get("is_blank", False))
+            notes = data.get("notes", "")
+
+            if readability not in ["clear", "partial", "unreadable"]:
+                readability = "partial"
+
+            return True, (str(extracted_text), readability, bool(is_blank), str(notes))
+        except Exception as e:
+            return False, str(e)
+
+    def _call_and_process_ocr_api(self, img_str: str, prompt: dict, question_index: int):
+        """调用OCR识别API（第一组），解析结果。"""
+        def _do_call():
+            response_text, error_from_call = self.api_service.call_first_api(img_str, prompt)
+            if error_from_call or not response_text:
+                raise RuntimeError(error_from_call if error_from_call else "OCR响应为空")
+
+            success, result = self._process_ocr_response(response_text)
+            if not success:
+                # OCR JSON 解析错误不重试
+                raise ValueError(f"OCR解析失败: {result}")
+            extracted_text, readability, is_blank, notes = result
+            return extracted_text, readability, is_blank, notes, response_text
+
+        try:
+            @unified_retry(
+                max_retries=1,
+                transient_error_checker=lambda e: self._is_transient_error(str(e)),
+                log_callback=self.log_signal.emit,
+                operation_name=f"第{question_index}题OCR识别"
+            )
+            def _ocr_with_retry():
+                return _do_call()
+
+            return _ocr_with_retry()
+        except Exception as e:
+            error_msg = str(e)
+            self.log_signal.emit(f"第{question_index}题OCR识别失败（已重试1次）: {error_msg}", True, "ERROR")
+            return None, None, None, None, None, error_msg
 
     def _is_unrecognizable_answer(self, student_answer_summary, itemized_scores):
         """
@@ -1399,20 +1529,106 @@ class GradingThread(QThread):
             self.log_signal.emit(f"警告：第 {question_index} 题未配置题目类型，使用默认类型", True, "WARNING")
             question_type = 'Subjective_PointBased_QA'
 
+        # 获取工作模式
+        work_mode = q_config.get('work_mode', 'direct_grade')
+        ocr_text = None
+        ocr_raw_response = None
+
         # 截取答案区域
         img_str = self._capture_question_area(answer_area_data)
         if img_str is None or not self.running:
             return False
 
-        # 构建Prompt
-        text_prompt_for_api = self.select_and_build_prompt(standard_answer, question_type)
-        if text_prompt_for_api is None:
-            return self.running  # 如果running为False则停止，否则继续下一题
+        # 构建Prompt并调用API评分
+        if work_mode == 'ocr_then_grade':
+            if dual_evaluation:
+                self.log_signal.emit(
+                    f"第 {question_index} 题为识评分离模式，已自动忽略双评设置",
+                    True,
+                    "WARNING"
+                )
+            ocr_prompt = self._build_ocr_prompt()
+            ocr_result = self._call_and_process_ocr_api(img_str, ocr_prompt, question_index)
+            # 兼容性处理：有的返回路径可能返回5个值（旧实现），有的返回6个值（包含ocr_error）
+            if isinstance(ocr_result, tuple):
+                if len(ocr_result) == 6:
+                    extracted_text, readability, is_blank, notes, ocr_raw_response, ocr_error = ocr_result
+                elif len(ocr_result) == 5:
+                    extracted_text, readability, is_blank, notes, ocr_raw_response = ocr_result
+                    ocr_error = None
+                else:
+                    extracted_text = readability = is_blank = notes = ocr_raw_response = None
+                    ocr_error = f"OCR返回值格式错误(len={len(ocr_result)})"
+            else:
+                extracted_text = readability = is_blank = notes = ocr_raw_response = None
+                ocr_error = "OCR返回值非元组"
 
-        # 调用API评分
-        eval_result = self.evaluate_answer(
-            img_str, text_prompt_for_api, q_config, dual_evaluation, score_diff_threshold
-        )
+            if ocr_error:
+                self._set_error_state(
+                    BusinessError(
+                        f"第 {question_index} 题OCR识别失败：{ocr_error}",
+                        BusinessError.TYPE_API_RESPONSE,
+                        question_index=question_index
+                    )
+                )
+                return False
+
+            if is_blank:
+                score = 0.0
+                reasoning_data = ("空白作答", self._build_zero_scoring_basis("空白作答"))
+                itemized_scores_data = [0]
+                confidence_data = {}
+                raw_ai_response = "OCR判定空白作答，未调用评分模型"
+                eval_result = (score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response)
+            elif readability == 'unreadable':
+                reason = notes.strip() if notes else "文字无法识别"
+                self._stop_grading(
+                    reason=StopReason.MANUAL_INTERVENTION,
+                    message=reason,
+                    detail=f"第 {question_index} 题OCR判断无法识别",
+                    emit_signal=True,
+                    log_level="WARNING"
+                )
+                return False
+            else:
+                ocr_text = extracted_text if extracted_text is not None else ""
+
+                text_prompt_for_api = self.select_and_build_text_prompt(standard_answer, question_type, ocr_text)
+                if text_prompt_for_api is None:
+                    return self.running
+
+                score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response, error_info = self._call_and_process_single_api(
+                    self.api_service.call_second_api,
+                    "",
+                    text_prompt_for_api,
+                    q_config,
+                    api_name="第二个API(评分)"
+                )
+
+                if error_info:
+                    if isinstance(error_info, dict) and error_info.get('anomaly_paper'):
+                        return self._handle_anomaly_paper(q_config, question_index, error_info)
+                    if not self.running:
+                        return False
+                    self._set_error_state(
+                        BusinessError(
+                            f"第 {question_index} 题评分失败：{error_info}",
+                            BusinessError.TYPE_API_RESPONSE,
+                            question_index=question_index
+                        )
+                    )
+                    return False
+
+                self.last_used_api = "second"
+                eval_result = (score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response)
+        else:
+            text_prompt_for_api = self.select_and_build_prompt(standard_answer, question_type)
+            if text_prompt_for_api is None:
+                return self.running  # 如果running为False则停止，否则继续下一题
+
+            eval_result = self.evaluate_answer(
+                img_str, text_prompt_for_api, q_config, dual_evaluation, score_diff_threshold
+            )
 
         # 处理评分结果
         if eval_result is None:
@@ -1466,8 +1682,18 @@ class GradingThread(QThread):
             return False
 
         # 记录阅卷结果
-        self.record_grading_result(question_index, score, img_str, reasoning_data,
-                                   itemized_scores_data, confidence_data, raw_ai_response)
+        self.record_grading_result(
+            question_index,
+            score,
+            img_str,
+            reasoning_data,
+            itemized_scores_data,
+            confidence_data,
+            raw_ai_response,
+            work_mode=work_mode,
+            ocr_text=ocr_text,
+            ocr_raw_response=ocr_raw_response
+        )
 
         # 题目间等待
         if q_idx < num_questions - 1 and self.running:
@@ -1914,6 +2140,7 @@ class GradingThread(QThread):
         
         # 重置API故障转移状态（每次新的阅卷任务开始时）
         self.current_api = "first"  # 重置为从第一个API开始
+        self.last_used_api = "first"
 
     def stop(self):
         """停止线程（用户手动停止）
@@ -2132,6 +2359,7 @@ class GradingThread(QThread):
             return None, error_dual, None, None, ""
 
         # 双评模式成功时，合并两次API的原始响应
+        self.last_used_api = "dual"
         combined_raw_response = f"API1:\n{response_text1}\n\nAPI2:\n{response_text2}"
         return final_score, combined_reasoning, combined_scores, combined_confidence, combined_raw_response
 
@@ -2202,6 +2430,7 @@ class GradingThread(QThread):
                     f"{api_name}评分成功", 
                     False, "INFO"
                 )
+                self.last_used_api = self.current_api
                 return score, reasoning, scores, confidence, response_text
             
             # 检查是否为异常试卷，这种情况不需要重试其他API
@@ -3061,7 +3290,9 @@ class GradingThread(QThread):
             if self.running: # 避免在已停止时重复设置错误
                 self._set_error_state(f"输入分数严重错误: {str(e)}")
 
-    def record_grading_result(self, question_index, score, img_str, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response=None):
+    def record_grading_result(self, question_index, score, img_str, reasoning_data, itemized_scores_data,
+                              confidence_data, raw_ai_response=None, work_mode: str = "direct_grade",
+                              ocr_text: Optional[str] = None, ocr_raw_response: Optional[str] = None):
         """记录阅卷结果，并发送信号 (重构后)"""
         try:
             # 提取评分细则前50字
@@ -3086,6 +3317,11 @@ class GradingThread(QThread):
                 'is_dual_evaluation_run': self.parameters.get('dual_evaluation', False),
                 'total_questions_in_run': self.total_question_count_in_run,
                 'scoring_rubric_summary': scoring_rubric_summary,
+                'work_mode': work_mode,
+                'work_mode_display': '识评分离' if work_mode == 'ocr_then_grade' else '识图直评',
+                'ocr_text': ocr_text if ocr_text is not None else "",
+                'ocr_raw_response': ocr_raw_response if ocr_raw_response is not None else "",
+                'ocr_model_id': self.first_model_id if work_mode == 'ocr_then_grade' else "",
             }
 
             # 2. 根据模式填充特定字段
@@ -3106,6 +3342,8 @@ class GradingThread(QThread):
                     'score_diff_threshold': self.parameters.get('score_diff_threshold', "AI未提供"),
                     'api1_student_answer_summary': reasoning_data.get('api1_summary', 'AI未提供'),
                     'api2_student_answer_summary': reasoning_data.get('api2_summary', 'AI未提供'),
+                    'api1_model_id': self.first_model_id,
+                    'api2_model_id': self.second_model_id,
                 }
                 record.update(base)
                 if isinstance(itemized_scores_data, dict):
@@ -3125,11 +3363,13 @@ class GradingThread(QThread):
             elif isinstance(reasoning_data, tuple) and len(reasoning_data) == 2:
                 # 单评成功模式
                 summary, basis = reasoning_data
+                used_model_id = self.second_model_id if self.last_used_api == "second" else self.first_model_id
                 record.update({
                     'student_answer': summary if summary else "AI未提供",
                     'reasoning_basis': basis,
                     'sub_scores': str(itemized_scores_data) if itemized_scores_data is not None else "AI未提供",
                     'raw_ai_response': raw_ai_response if raw_ai_response is not None else "AI未提供",
+                    'grade_model_id': used_model_id,
                 })
 
             else:

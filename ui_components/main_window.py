@@ -122,6 +122,10 @@ class MainWindow(QMainWindow):
         if m:
             return f"第{m.group(1)}题评分细则"
 
+        m = re.match(r"^question_(\d+)_work_mode$", f)
+        if m:
+            return f"第{m.group(1)}题工作模式"
+
         return f
 
     def _get_base_dir(self) -> pathlib.Path:
@@ -457,6 +461,18 @@ class MainWindow(QMainWindow):
             self.config_manager.update_config_in_memory(field_name, provider_id)
             label = self._display_name_for_field(str(field_name))
             self.log_message(f"{label} 已更新为：{ui_text}")
+        elif combo_box_name.startswith('work_mode_'):
+            q_index = combo_box_name.replace('work_mode_', '')
+            mode_map = {
+                '识图直评': 'direct_grade',
+                '识评分离': 'ocr_then_grade'
+            }
+            work_mode = mode_map.get(ui_text, 'direct_grade')
+            field_name = f"question_{q_index}_work_mode"
+            self.config_manager.update_config_in_memory(field_name, work_mode)
+            label = self._display_name_for_field(str(field_name))
+            self.log_message(f"{label} 已更新为：{ui_text}")
+            self._apply_ui_constraints()
         else:
             # 处理普通ComboBox（如subject_text）
             field_name = combo_box_name.replace('_text', '')  # subject_text -> subject
@@ -508,6 +524,13 @@ class MainWindow(QMainWindow):
             std_answer_widget = self.get_ui_element(f'StandardAnswer_text_{i}', QPlainTextEdit)
             if std_answer_widget:
                 self._connect_plain_text_edit_save_signal(std_answer_widget, i)
+
+        for i in range(1, self.max_questions + 1):
+            work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
+            if work_mode_combo:
+                work_mode_combo.currentTextChanged.connect(
+                    lambda text, name=f'work_mode_{i}': self.handle_comboBox_save(name, text)
+                )
 
     def _connect_plain_text_edit_save_signal(self, widget, question_index):
         widget.setProperty('question_index', question_index)
@@ -566,6 +589,13 @@ class MainWindow(QMainWindow):
         self.setup_text_fields()
         self.setup_dual_evaluation()
         self.setup_unattended_mode()
+
+        # 初始化每题工作模式下拉框
+        for i in range(1, self.max_questions + 1):
+            work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
+            if work_mode_combo:
+                if work_mode_combo.count() == 0:
+                    work_mode_combo.addItems(["识图直评", "识评分离"])
 
         self.load_config_to_ui()
         self._connect_signals() # <--- 在这里统一调用
@@ -666,6 +696,13 @@ class MainWindow(QMainWindow):
                     else:
                         step_text = str(step_value)
                     step_combo.setCurrentText(step_text)
+
+                # 加载每题工作模式
+                work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
+                if work_mode_combo and isinstance(work_mode_combo, QComboBox):
+                    work_mode_value = q_config.get('work_mode', 'direct_grade')
+                    display_text = '识评分离' if work_mode_value == 'ocr_then_grade' else '识图直评'
+                    work_mode_combo.setCurrentText(display_text)
                 
 
             # 加载完成后，应用所有UI约束
@@ -696,6 +733,9 @@ class MainWindow(QMainWindow):
         # 先做启动前校验（包含：供应商UI文本→内部ID归一化、必要坐标检查等），避免“保存了错误配置”或“启动→秒停”。
         if not self.check_required_settings():
             return
+
+        # 保存前同步工作模式选择
+        self._sync_work_mode_from_ui()
 
         self.log_message("尝试在运行前保存所有配置...")
         if not self.config_manager.save_all_configs_to_file():
@@ -785,6 +825,18 @@ class MainWindow(QMainWindow):
                 if dual_eval_checkbox:
                     dual_eval_checkbox.setChecked(False)
                 self.log_message("多题模式下自动禁用双评功能", is_error=False)
+
+            # 识评分离模式下禁用双评
+            if dual_evaluation:
+                for q_idx in enabled_questions_indices:
+                    q_cfg = self.config_manager.get_question_config(q_idx)
+                    if q_cfg.get('work_mode') == 'ocr_then_grade':
+                        dual_evaluation = False
+                        dual_eval_checkbox = self.get_ui_element('dualEvaluationCheckbox')
+                        if dual_eval_checkbox:
+                            dual_eval_checkbox.setChecked(False)
+                        self.log_message("识评分离模式下自动禁用双评功能", is_error=False)
+                        break
 
             question_configs_for_worker = []
             for q_idx in enabled_questions_indices:
@@ -1003,6 +1055,9 @@ class MainWindow(QMainWindow):
         # 循环结束后，清空字典
         self.answer_windows.clear()
 
+        # 保存前同步工作模式选择
+        self._sync_work_mode_from_ui()
+
         # 保存配置
         self.log_message("尝试在关闭程序前保存所有配置...")
         if not self.config_manager.save_all_configs_to_file():
@@ -1030,6 +1085,23 @@ class MainWindow(QMainWindow):
     def _apply_ui_constraints(self):
         is_single_q1_mode = self._is_single_q1_mode()
 
+        has_ocr_then_grade = False
+        try:
+            enabled_questions = self.config_manager.get_enabled_questions()
+            for q_idx in enabled_questions:
+                work_mode_combo = self.get_ui_element(f'work_mode_{q_idx}', QComboBox)
+                if work_mode_combo and isinstance(work_mode_combo, QComboBox):
+                    if work_mode_combo.currentText().strip() == '识评分离':
+                        has_ocr_then_grade = True
+                        break
+                else:
+                    q_cfg = self.config_manager.get_question_config(q_idx)
+                    if q_cfg.get('work_mode') == 'ocr_then_grade':
+                        has_ocr_then_grade = True
+                        break
+        except Exception:
+            has_ocr_then_grade = False
+
         dual_eval_checkbox = self.get_ui_element('dual_evaluation_enabled')
         unattended_checkbox = self.get_ui_element('unattended_mode_enabled')
         
@@ -1038,8 +1110,9 @@ class MainWindow(QMainWindow):
         is_unattended_enabled = unattended_checkbox and unattended_checkbox.isChecked() if unattended_checkbox else False
         
         if dual_eval_checkbox:
-            dual_eval_checkbox.setEnabled(is_single_q1_mode)
-            if not is_single_q1_mode and dual_eval_checkbox.isChecked():
+            dual_allowed = is_single_q1_mode and not has_ocr_then_grade
+            dual_eval_checkbox.setEnabled(dual_allowed)
+            if (not dual_allowed) and dual_eval_checkbox.isChecked():
                 dual_eval_checkbox.blockSignals(True)
                 dual_eval_checkbox.setChecked(False)
                 self.handle_checkBox_save('dual_evaluation_enabled', False)
@@ -1083,6 +1156,23 @@ class MainWindow(QMainWindow):
             
         # 更新选项卡标签显示状态
         self._update_tab_titles()
+
+    def _sync_work_mode_from_ui(self) -> None:
+        """将UI中的工作模式同步回配置内存，确保落盘一致。"""
+        try:
+            mode_map = {
+                '识图直评': 'direct_grade',
+                '识评分离': 'ocr_then_grade'
+            }
+            for i in range(1, self.max_questions + 1):
+                work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
+                if work_mode_combo and isinstance(work_mode_combo, QComboBox):
+                    ui_text = work_mode_combo.currentText().strip()
+                    work_mode = mode_map.get(ui_text, 'direct_grade')
+                    field_name = f'question_{i}_work_mode'
+                    self.config_manager.update_config_in_memory(field_name, work_mode)
+        except Exception:
+            pass
     
     def on_question_enabled_changed(self, state):
         if self._is_initializing: return
@@ -1102,6 +1192,8 @@ class MainWindow(QMainWindow):
         if std_answer: std_answer.setEnabled(is_enabled)
         step_combo = self.get_ui_element(f'score_rounding_step_{question_index}')
         if step_combo: step_combo.setEnabled(is_enabled)
+        work_mode_combo = self.get_ui_element(f'work_mode_{question_index}')
+        if work_mode_combo: work_mode_combo.setEnabled(is_enabled)
     
     def _update_tab_titles(self):
         """更新选项卡标题显示启用状态"""
