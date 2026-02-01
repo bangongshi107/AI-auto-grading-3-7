@@ -10,7 +10,7 @@ from typing import Union, Optional, Type, TypeVar, cast, Tuple
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QMessageBox, QDialog,
                              QComboBox, QLineEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
                              QPlainTextEdit, QApplication, QShortcut, QLabel, QPushButton)
-from PyQt5.QtCore import Qt, pyqtSignal, QEvent, QObject
+from PyQt5.QtCore import Qt, pyqtSignal, QEvent, QObject, QTimer
 from PyQt5.QtGui import QKeySequence, QFont, QKeyEvent, QCloseEvent, QIcon
 from PyQt5 import uic
 
@@ -36,6 +36,9 @@ class MainWindow(QMainWindow):
         self.api_service = api_service
         self.worker = worker
         self._is_initializing = True
+        self._pending_save = False
+        self._last_save_reason = ""
+        self._autosave_timer: Optional[QTimer] = None
 
         # 加载UI文件
         if getattr(sys, 'frozen', False):
@@ -75,6 +78,7 @@ class MainWindow(QMainWindow):
         self._ui_cache = {}
 
         self.init_ui()
+        self._setup_autosave_timer()
 
 
 
@@ -421,6 +425,7 @@ class MainWindow(QMainWindow):
             self.log_message(f"{label} 已更新（已隐藏）：{self._mask_secret(str(value))}")
         else:
             self.log_message(f"{label} 已更新：{value}")
+        self._mark_config_dirty(f"lineedit:{field_name}")
 
     def handle_plainTextEdit_save(self, field_name, value):
         if self._is_initializing: return
@@ -428,12 +433,14 @@ class MainWindow(QMainWindow):
         # 答案内容较长，日志可以简洁些
         label = self._display_name_for_field(str(field_name))
         self.log_message(f"{label} 已更新")
+        self._mark_config_dirty(f"plaintext:{field_name}")
 
     def handle_spinBox_save(self, field_name, value):
         if self._is_initializing: return
         self.config_manager.update_config_in_memory(field_name, value)
         label = self._display_name_for_field(str(field_name))
         self.log_message(f"{label} 已更新：{value}")
+        self._mark_config_dirty(f"spinbox:{field_name}")
     
     def handle_doubleSpinBox_save(self, field_name, value):
         """处理 QDoubleSpinBox 控件的保存"""
@@ -441,6 +448,7 @@ class MainWindow(QMainWindow):
         self.config_manager.update_config_in_memory(field_name, value)
         label = self._display_name_for_field(str(field_name))
         self.log_message(f"{label} 已更新：{value}")
+        self._mark_config_dirty(f"doublespin:{field_name}")
     
     # --- 统一的 ComboBox 处理函数 ---
     def handle_comboBox_save(self, combo_box_name, ui_text):
@@ -453,32 +461,48 @@ class MainWindow(QMainWindow):
 
         if combo_box_name in ['first_api_url', 'second_api_url']:
             # 处理AI评分模型提供商 ComboBox
-            provider_id = get_provider_id_from_ui_text(ui_text)
+            combo_box = self.get_ui_element(combo_box_name, QComboBox)
+            provider_id = None
+            if combo_box and isinstance(combo_box, QComboBox):
+                provider_id = combo_box.currentData()
+            if not provider_id:
+                provider_id = get_provider_id_from_ui_text(ui_text)
             if not provider_id:
                 self.log_message(f"错误: 无法识别的AI模型提供商 '{ui_text}'", is_error=True)
                 return
             field_name = 'first_api_provider' if combo_box_name == 'first_api_url' else 'second_api_provider'
             self.config_manager.update_config_in_memory(field_name, provider_id)
             label = self._display_name_for_field(str(field_name))
-            self.log_message(f"{label} 已更新为：{ui_text}")
+            display_text = combo_box.currentText() if combo_box else ui_text
+            self.log_message(f"{label} 已更新为：{display_text}")
+            self._mark_config_dirty(f"combobox:{field_name}")
         elif combo_box_name.startswith('work_mode_'):
             q_index = combo_box_name.replace('work_mode_', '')
-            mode_map = {
-                '识图直评': 'direct_grade',
-                '识评分离': 'ocr_then_grade'
-            }
-            work_mode = mode_map.get(ui_text, 'direct_grade')
+            combo_box = self.get_ui_element(combo_box_name, QComboBox)
+            work_mode = None
+            if combo_box and isinstance(combo_box, QComboBox):
+                work_mode = combo_box.currentData()
+            if not work_mode:
+                normalized_text = self._normalize_work_mode_ui_text(ui_text)
+                mode_map = {
+                    '识图直评': 'direct_grade',
+                    '识评分离': 'ocr_then_grade'
+                }
+                work_mode = mode_map.get(normalized_text, 'direct_grade')
             field_name = f"question_{q_index}_work_mode"
             self.config_manager.update_config_in_memory(field_name, work_mode)
             label = self._display_name_for_field(str(field_name))
-            self.log_message(f"{label} 已更新为：{ui_text}")
+            display_text = combo_box.currentText() if combo_box else ui_text
+            self.log_message(f"{label} 已更新为：{display_text}")
             self._apply_ui_constraints()
+            self._mark_config_dirty(f"combobox:{field_name}")
         else:
             # 处理普通ComboBox（如subject_text）
             field_name = combo_box_name.replace('_text', '')  # subject_text -> subject
             self.config_manager.update_config_in_memory(field_name, ui_text)
             label = self._display_name_for_field(str(field_name))
             self.log_message(f"{label} 已更新为：{ui_text}")
+            self._mark_config_dirty(f"combobox:{field_name}")
 
     def handle_checkBox_save(self, field_name, state):
         if self._is_initializing: return
@@ -486,6 +510,49 @@ class MainWindow(QMainWindow):
         self.config_manager.update_config_in_memory(field_name, value)
         label = self._display_name_for_field(str(field_name))
         self.log_message(f"{label} 已更新为：{'开启' if value else '关闭'}")
+        self._mark_config_dirty(f"checkbox:{field_name}")
+
+    # ======================================================================
+    #  统一的保存/加载体系：内存更新 + 定时/关键操作落盘
+    # ======================================================================
+
+    def _setup_autosave_timer(self) -> None:
+        """启动自动保存计时器（只在有变更时落盘）。"""
+        try:
+            if self._autosave_timer is None:
+                self._autosave_timer = QTimer(self)
+                self._autosave_timer.setInterval(60000)  # 60秒一次
+                self._autosave_timer.timeout.connect(lambda: self._flush_config_to_file("autosave"))
+            if not self._autosave_timer.isActive():
+                self._autosave_timer.start()
+        except Exception:
+            # 定时器异常不影响主流程
+            pass
+
+    def _mark_config_dirty(self, reason: str = "") -> None:
+        """标记当前配置有变更，仅保存到内存，等待定时/关键操作落盘。"""
+        if self._is_initializing:
+            return
+        self._pending_save = True
+        if reason:
+            self._last_save_reason = reason
+
+    def _flush_config_to_file(self, reason: str = "") -> bool:
+        """将内存中的配置统一保存到文件。"""
+        try:
+            if not self._pending_save and reason == "autosave":
+                return True
+            # 保存前同步工作模式（避免UI未失焦导致内存未更新）
+            self._sync_work_mode_from_ui()
+
+            ok = self.config_manager.save_all_configs_to_file()
+            if ok:
+                self._pending_save = False
+                if reason:
+                    self._last_save_reason = reason
+            return ok
+        except Exception:
+            return False
 
     def _connect_direct_edit_save_signals(self):
         """连接UI控件信号到即时保存处理函数"""
@@ -559,12 +626,12 @@ class MainWindow(QMainWindow):
         - first_api_url 和 second_api_url 下拉框只包含AI评分模型提供商
         """
         # --- 核心修改: 动态填充 ComboBox，只包含AI评分模型 ---
-        provider_ui_texts = list(UI_TEXT_TO_PROVIDER_ID.keys())
         for combo_name in ['first_api_url', 'second_api_url']:
             combo_box = self.get_ui_element(combo_name, QComboBox)
-            if combo_box:
+            if combo_box and isinstance(combo_box, QComboBox):
                 combo_box.clear()
-                combo_box.addItems(provider_ui_texts)
+                for ui_text, provider_id in UI_TEXT_TO_PROVIDER_ID.items():
+                    combo_box.addItem(ui_text, provider_id)
 
         # UI文件历史上包含第8题Tab；此处确保运行时只保留7题
         self._trim_question_tabs_to_max()
@@ -593,9 +660,10 @@ class MainWindow(QMainWindow):
         # 初始化每题工作模式下拉框
         for i in range(1, self.max_questions + 1):
             work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
-            if work_mode_combo:
-                if work_mode_combo.count() == 0:
-                    work_mode_combo.addItems(["识图直评", "识评分离"])
+            if work_mode_combo and isinstance(work_mode_combo, QComboBox):
+                work_mode_combo.clear()
+                work_mode_combo.addItem("一 识图直评", "direct_grade")
+                work_mode_combo.addItem("二 识评分离", "ocr_then_grade")
 
         self.load_config_to_ui()
         self._connect_signals() # <--- 在这里统一调用
@@ -639,12 +707,16 @@ class MainWindow(QMainWindow):
             for combo_name, provider_id in provider_map.items():
                 combo_box = self.get_ui_element(combo_name, QComboBox)
                 if combo_box and isinstance(combo_box, QComboBox):
-                    # 将内部ID (如 "volcengine") 转换为UI文本 (如 "火山引擎 (推荐)")
-                    ui_text_to_select = get_ui_text_from_provider_id(provider_id)
-                    if ui_text_to_select:
-                        combo_box.setCurrentText(ui_text_to_select)
+                    index = combo_box.findData(provider_id)
+                    if index >= 0:
+                        combo_box.setCurrentIndex(index)
                     else:
-                        combo_box.setCurrentIndex(0)  # 如果找不到，默认选第一个
+                        # 兼容旧配置：尝试通过显示文本定位
+                        ui_text_to_select = get_ui_text_from_provider_id(provider_id)
+                        if ui_text_to_select:
+                            combo_box.setCurrentText(ui_text_to_select)
+                        else:
+                            combo_box.setCurrentIndex(0)
 
             # 加载其他配置
             subject_widget = self.get_ui_element('subject_text', QComboBox)
@@ -701,8 +773,12 @@ class MainWindow(QMainWindow):
                 work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
                 if work_mode_combo and isinstance(work_mode_combo, QComboBox):
                     work_mode_value = q_config.get('work_mode', 'direct_grade')
-                    display_text = '识评分离' if work_mode_value == 'ocr_then_grade' else '识图直评'
-                    work_mode_combo.setCurrentText(display_text)
+                    index = work_mode_combo.findData(work_mode_value)
+                    if index >= 0:
+                        work_mode_combo.setCurrentIndex(index)
+                    else:
+                        display_text = '二 识评分离' if work_mode_value == 'ocr_then_grade' else '一 识图直评'
+                        work_mode_combo.setCurrentText(display_text)
                 
 
             # 加载完成后，应用所有UI约束
@@ -717,6 +793,7 @@ class MainWindow(QMainWindow):
                 pass
 
             self.log_message("配置已成功加载到UI并应用约束。")
+            self._pending_save = False
             self._config_loaded_once = True
         except Exception as e:
             detail = traceback.format_exc()
@@ -738,7 +815,7 @@ class MainWindow(QMainWindow):
         self._sync_work_mode_from_ui()
 
         self.log_message("尝试在运行前保存所有配置...")
-        if not self.config_manager.save_all_configs_to_file():
+        if not self._flush_config_to_file("before_run"):
             self.log_message("保存设置失败，自动阅卷无法开始。", is_error=True)
             self._show_message(
                 title="保存设置失败",
@@ -1060,7 +1137,7 @@ class MainWindow(QMainWindow):
 
         # 保存配置
         self.log_message("尝试在关闭程序前保存所有配置...")
-        if not self.config_manager.save_all_configs_to_file():
+        if not self._flush_config_to_file("on_close"):
             self.log_message("警告：关闭程序前保存配置失败。", is_error=True)
         else:
             self.log_message("所有配置已在关闭前成功保存。")
@@ -1091,7 +1168,10 @@ class MainWindow(QMainWindow):
             for q_idx in enabled_questions:
                 work_mode_combo = self.get_ui_element(f'work_mode_{q_idx}', QComboBox)
                 if work_mode_combo and isinstance(work_mode_combo, QComboBox):
-                    if work_mode_combo.currentText().strip() == '识评分离':
+                    mode_value = work_mode_combo.currentData()
+                    if not mode_value:
+                        mode_value = 'ocr_then_grade' if self._normalize_work_mode_ui_text(work_mode_combo.currentText()) == '识评分离' else 'direct_grade'
+                    if mode_value == 'ocr_then_grade':
                         has_ocr_then_grade = True
                         break
                 else:
@@ -1167,12 +1247,21 @@ class MainWindow(QMainWindow):
             for i in range(1, self.max_questions + 1):
                 work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
                 if work_mode_combo and isinstance(work_mode_combo, QComboBox):
-                    ui_text = work_mode_combo.currentText().strip()
-                    work_mode = mode_map.get(ui_text, 'direct_grade')
+                    work_mode = work_mode_combo.currentData()
+                    if not work_mode:
+                        ui_text = self._normalize_work_mode_ui_text(work_mode_combo.currentText())
+                        work_mode = mode_map.get(ui_text, 'direct_grade')
                     field_name = f'question_{i}_work_mode'
                     self.config_manager.update_config_in_memory(field_name, work_mode)
         except Exception:
             pass
+
+    def _normalize_work_mode_ui_text(self, ui_text: str) -> str:
+        """将工作模式下拉框显示文本标准化为核心关键字。"""
+        text = str(ui_text).strip() if ui_text is not None else ""
+        if text.startswith("一") or text.startswith("二"):
+            text = text[1:].strip()
+        return text
     
     def on_question_enabled_changed(self, state):
         if self._is_initializing: return
@@ -1182,6 +1271,7 @@ class MainWindow(QMainWindow):
             q_index = int(sender.objectName().replace('enableQuestion', ''))
             self.handle_checkBox_save(f"question_{q_index}_enabled", bool(state))
             self._apply_ui_constraints()
+            self._mark_config_dirty(f"question_enabled:{q_index}")
         except (ValueError, AttributeError): pass
         
     def update_config_button(self, question_index, is_enabled):
@@ -1390,7 +1480,7 @@ class MainWindow(QMainWindow):
         # 连接配置更新信号，确保题目配置保存到文件
         def on_config_updated():
             self.log_message(f"题目{question_index}配置已更新，正在保存到文件...")
-            if self.config_manager.save_all_configs_to_file():
+            if self._flush_config_to_file("question_dialog_save"):
                 self.log_message("题目配置已成功保存到文件")
             else:
                 self.log_message("警告：题目配置保存到文件失败", is_error=True)
@@ -1541,5 +1631,6 @@ class MainWindow(QMainWindow):
             step_value = float(text)
             self.config_manager.update_question_config(question_index, 'score_rounding_step', step_value)
             self.log_message(f"第{question_index}题步长更新为: {step_value}")
+            self._mark_config_dirty(f"step:{question_index}")
         except (ValueError, TypeError):
             pass  # 忽略无效的步长值

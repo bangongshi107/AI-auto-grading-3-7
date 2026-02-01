@@ -846,6 +846,14 @@ class GradingThread(QThread):
         # 如果两个API都失败，停止阅卷并请求人工介入
         self.current_api = "first"  # 默认从第一个API开始
         self.last_used_api = "first"  # 记录单评实际使用的API
+
+        # =================================================================
+        # API短期熔断（非无人模式下提升成功率与效率）
+        # =================================================================
+        self._api_failure_counts = {"first": 0, "second": 0}
+        self._api_cooldown_until = {"first": 0.0, "second": 0.0}
+        self._api_failure_threshold = 2
+        self._api_cooldown_seconds = 60
         
         # =================================================================
         # P0修复：线程安全与并发问题
@@ -904,6 +912,7 @@ class GradingThread(QThread):
         evidence_bar = (
             "【证据】\n"
             "只有找到直接证据才给分；无法评分则人工介入（不想象/猜/补全/疑似）。\n"
+            "无法辨认的字视为无效答案，不给分；禁止猜测或按疑似内容给分。\n"
             "scoring_basis逐点：判定+得X分+证据【…】。避免使用\"\"避免JSON错误。示例：第1点 未命中 得0分 证据:【...】\n"
             "若答案空白/涂改/乱写/答非所问/全错，可依细则判0分，需在scoring_basis说明理由和证据；判0分必须有证据（禁止想象/猜/补全），无法判断就人工介入。\n"
         )
@@ -1030,7 +1039,7 @@ class GradingThread(QThread):
             "【严格要求】\n"
             "1) 只做文字/符号提取，不做任何解释、分析、归纳、判断。\n"
             "2) 数学/化学/物理等符号必须原样输出，不要转为LaTeX。\n"
-            "3) 看不清的字符用[?]占位，严禁猜测补全。\n"
+            "3) 无法辨认的字符用[?]占位，严禁猜测或按疑似内容补全。\n"
             "4) 若仅有涂改/擦除痕迹、涂抹、乱涂，且无法辨认任何字符/符号，readability必须为unreadable，is_blank必须为false。\n"
             "5) 若画面为空白或仅有无意义细微痕迹但可以确认没有可识别字符，is_blank必须为true；extracted_text可为空字符串。\n\n"
             "【输出格式】\n"
@@ -1148,6 +1157,53 @@ class GradingThread(QThread):
             self.log_signal.emit(f"第{question_index}题OCR识别失败（已重试1次）: {error_msg}", True, "ERROR")
             return None, None, None, None, None, error_msg
 
+    def _call_and_process_text_grading_with_failover(self, text_prompt: dict, q_config: dict, question_index: int):
+        """工作模式二评分阶段的故障转移：优先API2，失败时降级到API1。"""
+        api_chain = [
+            ("second", self.api_service.call_second_api, "第二个API(评分)"),
+            ("first", self.api_service.call_first_api, "第一个API(评分)"),
+        ]
+
+        # 若两个API均处于熔断期，则忽略熔断以最大化成功率
+        try:
+            ignore_cooldown = all(self._is_api_in_cooldown(k) for k, _, _ in api_chain)
+        except Exception:
+            ignore_cooldown = False
+
+        last_error = None
+
+        for api_key, api_func, api_name in api_chain:
+            if not ignore_cooldown and self._is_api_in_cooldown(api_key):
+                self.log_signal.emit(f"{api_name}处于短期熔断，跳过本次尝试", False, "INFO")
+                continue
+            score, reasoning, itemized_scores, confidence, response_text, error = self._call_and_process_single_api(
+                api_func,
+                "",
+                text_prompt,
+                q_config,
+                api_name=api_name,
+                api_key=api_key
+            )
+
+            if not self.running:
+                return None, None, None, None, response_text, "线程已停止（人工介入或用户取消）"
+
+            if not error:
+                self.last_used_api = api_key
+                return score, reasoning, itemized_scores, confidence, response_text, None
+
+            # 异常试卷或人工介入：直接返回
+            if isinstance(error, dict) and error.get('anomaly_paper'):
+                return None, None, None, None, response_text, error
+
+            if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入", "需要人工介入"]):
+                return None, None, None, None, response_text, error
+
+            last_error = error
+            self.log_signal.emit(f"{api_name}评分失败，尝试备用API", False, "INFO")
+
+        return None, None, None, None, None, f"评分失败（已尝试两个API）: {last_error}"
+
     def _is_unrecognizable_answer(self, student_answer_summary, itemized_scores):
         """
         检查学生答案是否无法识别。
@@ -1254,6 +1310,28 @@ class GradingThread(QThread):
 
         return None
 
+    def _is_anomaly_label_text(self, extracted_text: Optional[str]) -> bool:
+        """严格判定是否为异常试卷标记文本。
+
+        仅当图片上没有手写内容，且只出现“图片异常请标记异常试卷”字样时返回True。
+        这里采用严格匹配：去除空白与常见符号后，必须完全等于目标短句。
+        """
+        if not extracted_text:
+            return False
+
+        try:
+            text = str(extracted_text)
+        except Exception:
+            return False
+
+        # 规范化：去除空白与常见符号
+        normalized = re.sub(r"\s+", "", text)
+        normalized = normalized.replace("：", ":").replace("，", ",").replace("。", "")
+        normalized = re.sub(r"[^\w\u4e00-\u9fff]", "", normalized)
+
+        target = "图片异常请标记异常试卷"
+        return normalized == target
+
     def _build_zero_scoring_basis(self, reason: str) -> str:
         reason = (reason or "").strip()
         reason = reason.replace("异常试卷", "").replace("异常卷", "").strip()
@@ -1311,22 +1389,115 @@ class GradingThread(QThread):
     def _is_transient_error(self, error_msg) -> bool:
         """判断错误信息是否为短暂/可重试的网络/超时/token类错误（v2.0增强版）。
 
-        使用新的精细错误分类系统，只有明确可重试和可能可重试的错误才返回True。
+        使用新的精细错误分类系统，仅对 5xx / 429 / 连接中断 / 超时 等短暂性错误返回True。
         """
         if not error_msg:
             return False
 
         # 将错误消息转换为异常对象以使用新的分类系统
         try:
-            # 使用新的精细分类系统
-            _, retryability = extract_error_type_and_classify(RuntimeError(str(error_msg)))
-            
-            # 只有明确可重试和可能可重试的错误才返回True
-            return retryability in (ErrorRetryability.DEFINITELY_RETRYABLE, 
-                                   ErrorRetryability.POSSIBLY_RETRYABLE)
-        except:
-            # 如果分类失败，使用保守策略：假定可重试
-            return True
+            error_type, _ = extract_error_type_and_classify(RuntimeError(str(error_msg)))
+            return error_type in {
+                'timeout',
+                'network',
+                'rate_limit',
+                'service_unavailable',
+                'server_error',
+            }
+        except Exception:
+            # 如果分类失败，使用保守策略：不重试
+            return False
+
+    def _is_api_in_cooldown(self, api_key: str) -> bool:
+        try:
+            return time.time() < float(self._api_cooldown_until.get(api_key, 0.0))
+        except Exception:
+            return False
+
+    def _mark_api_success(self, api_key: Optional[str]) -> None:
+        if not api_key:
+            return
+        try:
+            self._api_failure_counts[api_key] = 0
+            self._api_cooldown_until[api_key] = 0.0
+        except Exception:
+            pass
+
+    def _mark_api_failure(self, api_key: Optional[str]) -> None:
+        if not api_key:
+            return
+        try:
+            current = int(self._api_failure_counts.get(api_key, 0)) + 1
+            self._api_failure_counts[api_key] = current
+            if current >= int(self._api_failure_threshold):
+                self._api_cooldown_until[api_key] = time.time() + float(self._api_cooldown_seconds)
+                self.log_signal.emit(
+                    f"{api_key.upper()} 连续失败{current}次，进入{self._api_cooldown_seconds}s短期熔断",
+                    False, "WARNING"
+                )
+        except Exception:
+            pass
+
+    def _is_unattended_retryable_error_message(self, error_msg: str) -> bool:
+        """无人模式可重试判定：仅覆盖 5xx / 429 / 连接中断 / 超时等短暂性错误。"""
+        if not error_msg:
+            return False
+
+        try:
+            error_type, _ = extract_error_type_and_classify(RuntimeError(str(error_msg)))
+        except Exception:
+            return False
+
+        return error_type in {
+            'timeout',
+            'network',
+            'rate_limit',
+            'service_unavailable',
+            'server_error',
+        }
+
+    def _schedule_unattended_retry_if_needed(self, error_msg: str) -> bool:
+        """若满足无人模式重试条件则进入重试状态并等待，返回是否已安排重试。"""
+        if not self.unattended_mode_enabled:
+            return False
+
+        if not self._is_unattended_retryable_error_message(error_msg):
+            return False
+
+        if self._unattended_retry_count >= self.unattended_max_retry_rounds:
+            try:
+                self.log_signal.emit(
+                    f"[无人模式] 已达到最大重试次数 ({self.unattended_max_retry_rounds})，停止重试",
+                    True, "ERROR"
+                )
+            except Exception:
+                pass
+            return False
+
+        self._unattended_retry_count += 1
+
+        try:
+            self.log_signal.emit(
+                f"[无人模式] 检测到可重试错误，准备第 {self._unattended_retry_count}/{self.unattended_max_retry_rounds} 次重试",
+                False, "WARNING"
+            )
+        except Exception:
+            pass
+
+        with self._state_lock:
+            self.running = False
+            self.completion_status = "retrying"
+            self.interrupt_reason = str(error_msg)
+            try:
+                self.log_signal.emit(
+                    f"[无人模式] 等待 {self.unattended_retry_delay} 秒后重试...",
+                    False, "INFO"
+                )
+            except Exception:
+                pass
+
+        time.sleep(self.unattended_retry_delay)
+        return True
 
     def _set_error_state(self, reason, error: Optional[GradingError] = None):
         """统一设置错误状态（线程安全）
@@ -1361,6 +1532,10 @@ class GradingThread(QThread):
         
         # 简化：直接使用原始错误消息，不添加额外前缀
         log_msg = str(reason)
+
+        # 无人模式：扩大可重试范围（5xx/429/连接中断/超时）
+        if self._schedule_unattended_retry_if_needed(log_msg):
+            return
         
         with self._state_lock:
             self.completion_status = "error"
@@ -1573,6 +1748,15 @@ class GradingThread(QThread):
                 )
                 return False
 
+            # 严格的异常试卷判定：仅当OCR文本为“图片异常请标记异常试卷”时触发
+            if self._is_anomaly_label_text(extracted_text):
+                anomaly_info = {
+                    'anomaly_paper': True,
+                    'message': '检测到异常试卷标记文本',
+                    'raw_feedback': extracted_text
+                }
+                return self._handle_anomaly_paper(q_config, question_index, anomaly_info)
+
             if is_blank:
                 score = 0.0
                 reasoning_data = ("空白作答", self._build_zero_scoring_basis("空白作答"))
@@ -1597,12 +1781,10 @@ class GradingThread(QThread):
                 if text_prompt_for_api is None:
                     return self.running
 
-                score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response, error_info = self._call_and_process_single_api(
-                    self.api_service.call_second_api,
-                    "",
+                score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response, error_info = self._call_and_process_text_grading_with_failover(
                     text_prompt_for_api,
                     q_config,
-                    api_name="第二个API(评分)"
+                    question_index
                 )
 
                 if error_info:
@@ -1847,12 +2029,12 @@ class GradingThread(QThread):
                     f"[无人模式] 检测到可重试错误，准备第 {self._unattended_retry_count}/{self.unattended_max_retry_rounds} 次重试",
                     False, "WARNING"
                 )
-                
-                # 重置running状态，准备重试（状态变更和日志在同一原子操作中）
+
+                # 进入重试状态（状态变更和日志在同一原子操作中）
                 with self._state_lock:
                     self.running = True
-                    self.completion_status = "running"
-                    
+                    self.completion_status = "retrying"
+
                     # 在锁内发送信号，确保状态和信号的原子性
                     try:
                         self.log_signal.emit(
@@ -1861,14 +2043,9 @@ class GradingThread(QThread):
                         )
                     except:
                         pass
-                
+
                 # 等待重试延迟（在锁外执行，避免长时间持有锁）
                 time.sleep(self.unattended_retry_delay)
-                
-                # 标记为重试状态而非错误
-                with self._state_lock:
-                    if self.completion_status == "error":
-                        self.completion_status = "retrying"
             elif self.unattended_mode_enabled:
                 self.log_signal.emit(
                     f"[无人模式] 已达到最大重试次数 ({self.unattended_max_retry_rounds})，停止重试",
@@ -2024,17 +2201,16 @@ class GradingThread(QThread):
             dual_evaluation = params.get('dual_evaluation', False) if isinstance(params, dict) else False
             score_diff_threshold = params.get('score_diff_threshold', 10) if isinstance(params, dict) else 10
             
-            # 加载无人模式配置（仅在第一次运行时）
-            if self._unattended_retry_count == 0:
-                self.unattended_mode_enabled = params.get('unattended_mode_enabled', False) if isinstance(params, dict) else False
-                self.unattended_retry_delay = params.get('unattended_retry_delay', 120) if isinstance(params, dict) else 120
-                self.unattended_max_retry_rounds = params.get('unattended_max_retry_rounds', 10) if isinstance(params, dict) else 10
-                
-                if self.unattended_mode_enabled:
-                    self.log_signal.emit(
-                        f"无人模式已启用：重试延迟={self.unattended_retry_delay}秒，最大重试轮数={self.unattended_max_retry_rounds}",
-                        False, "INFO"
-                    )
+            # 加载无人模式配置（每次任务启动都同步最新配置）
+            self.unattended_mode_enabled = params.get('unattended_mode_enabled', False) if isinstance(params, dict) else False
+            self.unattended_retry_delay = params.get('unattended_retry_delay', 120) if isinstance(params, dict) else 120
+            self.unattended_max_retry_rounds = params.get('unattended_max_retry_rounds', 10) if isinstance(params, dict) else 10
+            
+            if self.unattended_mode_enabled:
+                self.log_signal.emit(
+                    f"无人模式已启用：重试延迟={self.unattended_retry_delay}秒，最大重试轮数={self.unattended_max_retry_rounds}",
+                    False, "INFO"
+                )
 
             if not question_configs:
                 self._set_error_state(ConfigError("未配置题目信息", config_key="question_configs"))
@@ -2132,6 +2308,16 @@ class GradingThread(QThread):
                 self.max_score = kwargs['max_score']
             if 'min_score' in kwargs:
                 self.min_score = kwargs['min_score']
+
+        # ===== 无人模式重试计数生命周期：每次新任务开始都重置 =====
+        self._unattended_retry_count = 0
+
+        # 重置API熔断状态（每次新任务开始时）
+        try:
+            self._api_failure_counts = {"first": 0, "second": 0}
+            self._api_cooldown_until = {"first": 0.0, "second": 0.0}
+        except Exception:
+            pass
 
         # 保存API配置信息
         self.first_model_id = kwargs.get('first_model_id', '')
@@ -2291,7 +2477,8 @@ class GradingThread(QThread):
                 img_str,
                 prompt,
                 current_question_config,
-                api_name="第一个API"
+                api_name="第一个API",
+                api_key="first"
             )
             if error1:
                 self._set_error_state(error1)
@@ -2302,7 +2489,8 @@ class GradingThread(QThread):
                 img_str,
                 prompt,
                 current_question_config,
-                api_name="第二个API"
+                api_name="第二个API",
+                api_key="second"
             )
         else:
             jitter_delay = random.uniform(0.2, 0.5)
@@ -2317,7 +2505,8 @@ class GradingThread(QThread):
                     img_str,
                     prompt,
                     current_question_config,
-                    api_name="第一个API"
+                    api_name="第一个API",
+                    api_key="first"
                 )
 
             def _call_api2_with_delay():
@@ -2327,7 +2516,8 @@ class GradingThread(QThread):
                     img_str,
                     prompt,
                     current_question_config,
-                    api_name="第二个API"
+                    api_name="第二个API",
+                    api_key="second"
                 )
 
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -2401,6 +2591,18 @@ class GradingThread(QThread):
             api_func = current_config["func"]
             api_name = current_config["name"]
             other_api = current_config["other"]
+
+            # 若当前API处于熔断期且另一API可用，则优先切换到另一API
+            try:
+                if self._is_api_in_cooldown(self.current_api) and not self._is_api_in_cooldown(other_api):
+                    self.log_signal.emit(f"{api_name}处于短期熔断，切换到备用API", False, "INFO")
+                    self.current_api = other_api
+                    current_config = api_configs[self.current_api]
+                    api_func = current_config["func"]
+                    api_name = current_config["name"]
+                    other_api = current_config["other"]
+            except Exception:
+                pass
             
             # 记录尝试的API
             attempted_apis.append(self.current_api)
@@ -2416,7 +2618,8 @@ class GradingThread(QThread):
                 img_str,
                 prompt,
                 current_question_config,
-                api_name=api_name
+                api_name=api_name,
+                api_key=self.current_api
             )
             
             # 【关键修复】调用API后检查线程状态，如果已停止（如人工介入）则立即返回
@@ -2457,6 +2660,10 @@ class GradingThread(QThread):
             self.current_api = other_api
         
         # 两个API都失败了，使用统一停止入口
+        # 无人模式：若为可重试错误（5xx/429/连接中断/超时），进入重试状态
+        if self._schedule_unattended_retry_if_needed(str(last_error or "")):
+            return None, None, None, None, ""
+
         self._stop_grading(
             reason=StopReason.API_ERROR,
             message="两个AI接口均失败，请检查网络或密钥配置",
@@ -2473,7 +2680,7 @@ class GradingThread(QThread):
         return None, "两个AI接口均失败", None, None, ""
 
 
-    def _call_and_process_single_api(self, api_call_func, img_str, prompt, q_config, api_name="API", max_retries=2):
+    def _call_and_process_single_api(self, api_call_func, img_str, prompt, q_config, api_name="API", max_retries=2, api_key: Optional[str] = None):
         """
         调用指定的API函数，并处理其响应。使用统一重试机制（最多重试1次），节省token和调用次数。
 
@@ -2500,6 +2707,7 @@ class GradingThread(QThread):
 
             if success:
                 score, reasoning, itemized_scores, confidence = result_data
+                self._mark_api_success(api_key)
                 return score, reasoning, itemized_scores, confidence, response_text, None
             else:
                 error_info = result_data
@@ -2569,6 +2777,8 @@ class GradingThread(QThread):
         except Exception as e:
             # 所有重试都失败了
             error_msg = str(e)
+            if self._is_transient_error(error_msg):
+                self._mark_api_failure(api_key)
             self.log_signal.emit(f"{api_name}调用失败（已重试1次）: {error_msg}", True, "ERROR")
             return None, None, None, None, None, error_msg
 
@@ -2736,8 +2946,20 @@ class GradingThread(QThread):
                     )
                     return False, {'manual_intervention': True, 'message': f'空白/无有效作答: {blank_msg}', 'raw_feedback': display_text}
                 else:  # anomaly
+                    # 异常试卷仅允许通过OCR识别到固定标记触发，此处不允许AI判定异常
                     display_text = student_answer_summary if student_answer_summary else ""
-                    return False, {'anomaly_paper': True, 'message': f'空白/无有效作答: {blank_msg}', 'raw_feedback': display_text}
+                    self.log_signal.emit(
+                        f"空白/无有效作答检测到异常卷策略，但已按人工介入处理（异常卷仅限固定标记触发）：{blank_msg}",
+                        True, "WARNING"
+                    )
+                    self._stop_grading(
+                        reason=StopReason.MANUAL_INTERVENTION,
+                        message=f"空白/无有效作答({blank_msg})需要人工处理",
+                        detail=display_text,
+                        emit_signal=True,
+                        log_level="WARNING"
+                    )
+                    return False, {'manual_intervention': True, 'message': f'空白/无有效作答: {blank_msg}', 'raw_feedback': display_text}
 
             # 【乱码/涂画/无法识别有效文字】按策略处理（默认人工）
             gibberish_msg = self._detect_gibberish_or_doodle_feedback(student_answer_summary, scoring_basis)
@@ -2749,17 +2971,21 @@ class GradingThread(QThread):
                     student_answer_summary = student_answer_summary if student_answer_summary else '疑似涂画/乱码作答'
                     scoring_basis = self._build_zero_scoring_basis(gibberish_msg)
                 elif gibberish_policy == 'anomaly':
+                    # 异常试卷仅允许通过OCR识别到固定标记触发，此处不允许AI判定异常
                     display_text = student_answer_summary if student_answer_summary else ""
-                    return False, {'anomaly_paper': True, 'message': f'疑似涂画/乱码: {gibberish_msg}', 'raw_feedback': display_text}
+                    self.log_signal.emit(
+                        f"疑似涂画/乱码检测到异常卷策略，但已按人工介入处理（异常卷仅限固定标记触发）：{gibberish_msg}",
+                        True, "WARNING"
+                    )
+                    self._stop_grading(
+                        reason=StopReason.MANUAL_INTERVENTION,
+                        message=f"疑似涂画/乱码({gibberish_msg})需要人工处理",
+                        detail=display_text,
+                        emit_signal=True,
+                        log_level="WARNING"
+                    )
+                    return False, {'manual_intervention': True, 'message': f'疑似涂画/乱码: {gibberish_msg}', 'raw_feedback': display_text}
                 # manual: 维持默认流程（后续可能由无法识别/请求图片等逻辑中止）
-
-            # 【异常试卷检测】检测AI回复中是否包含"异常试卷"等关键词
-            anomaly_msg = self._detect_anomaly_paper_feedback(student_answer_summary, scoring_basis)
-            if anomaly_msg:
-                self.log_signal.emit(f"检测到异常试卷: {anomaly_msg}", True, "WARNING")
-                display_text = student_answer_summary if student_answer_summary else ""
-                # 返回带有异常试卷标记的结构，由上层根据配置决定是自动处理还是人工介入
-                return False, {'anomaly_paper': True, 'message': anomaly_msg, 'raw_feedback': display_text}
 
             # 检查是否为无法识别的情况，如果是则停止阅卷（在人工介入检查之后）
             if self._is_unrecognizable_answer(student_answer_summary, itemized_scores_from_json):
@@ -2850,7 +3076,17 @@ class GradingThread(QThread):
                 return False, error_msg
 
             # 合并展示：总分 + 评分依据（首行作为UI标题）
-            header = f"【总分 {final_score} 分 - AI评分依据如下】"
+            work_mode = current_question_config.get('work_mode', 'direct_grade')
+            mode_label = "直评" if work_mode != 'ocr_then_grade' else "分离"
+            api_label = ""
+            if work_mode != 'ocr_then_grade':
+                if self.last_used_api == "dual":
+                    api_label = " - AI 1/AI 2"
+                elif self.last_used_api == "second":
+                    api_label = " - AI 2"
+                else:
+                    api_label = " - AI 1"
+            header = f"【总分 {final_score} 分 - {mode_label}{api_label} - AI评分依据如下】"
             basis_text = scoring_basis.strip() if isinstance(scoring_basis, str) else str(scoring_basis)
             display_text = f"{header}\n{basis_text}" if basis_text else header
             self.log_signal.emit(display_text, False, "RESULT")
@@ -3204,6 +3440,10 @@ class GradingThread(QThread):
     def input_score(self, final_score_to_input: float, default_score_pos, confirm_button_pos, current_question_config):
         """输入分数，根据模式选择单点或三步输入，并处理分数到0.5的倍数。"""
         try:
+            if not self.running:
+                self.log_signal.emit("检测到已停止，跳过本次分数输入与提交。", False, "INFO")
+                return
+
             input_successful = False
             current_processing_q_index = current_question_config.get('question_index', self.api_service.current_question_index)
             q_enable_three_step_scoring = current_question_config.get('enable_three_step_scoring', False)
@@ -3254,11 +3494,20 @@ class GradingThread(QThread):
                 total_split = s1 + s2 + s3
                 self.log_signal.emit(f"三步拆分结果: s1={s1}, s2={s2}, s3={s3} (总和: {total_split})", False, "INFO")
 
+                if not self.running:
+                    self.log_signal.emit("检测到已停止，跳过本次分数提交。", False, "INFO")
+                    return
                 if not self._perform_single_input(s1, q_score_input_pos_step1):
                     self._set_error_state("三步打分输入失败 (步骤1)")
                     return
+                if not self.running:
+                    self.log_signal.emit("检测到已停止，跳过本次分数提交。", False, "INFO")
+                    return
                 if not self._perform_single_input(s2, q_score_input_pos_step2):
                     self._set_error_state("三步打分输入失败 (步骤2)")
+                    return
+                if not self.running:
+                    self.log_signal.emit("检测到已停止，跳过本次分数提交。", False, "INFO")
                     return
                 if not self._perform_single_input(s3, q_score_input_pos_step3):
                     self._set_error_state("三步打分输入失败 (步骤3)")
@@ -3276,6 +3525,9 @@ class GradingThread(QThread):
                 input_successful = True
 
             if input_successful:
+                if not self.running:
+                    self.log_signal.emit("检测到已停止，已跳过本次分数提交。", False, "INFO")
+                    return
                 if not confirm_button_pos:
                     self._set_error_state("确认按钮位置未配置，阅卷中止。")
                     return

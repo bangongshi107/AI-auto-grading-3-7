@@ -4,6 +4,7 @@ import datetime
 import pathlib
 import warnings
 import ctypes
+import shutil
 from ctypes import wintypes
 from typing import Callable
 
@@ -302,8 +303,36 @@ class SignalConnectionManager:
         if failed > 0:
             print(f"[信号管理] 成功断开 {disconnected} 个连接，{failed} 个连接断开失败（可能已断开）")
 
+
+
 class Application:
+    @staticmethod
+    def _clear_logs_folder() -> None:
+        """在程序启动时清理Logs文件夹"""
+        try:
+            logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Logs')
+            
+            # 如果Logs文件夹存在，清理其中的所有文件
+            if os.path.exists(logs_dir):
+                for filename in os.listdir(logs_dir):
+                    file_path = os.path.join(logs_dir, filename)
+                    try:
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                        elif os.path.isdir(file_path):
+                            shutil.rmtree(file_path)
+                    except Exception:
+                        pass  # 清理失败不影响程序运行
+            else:
+                # 如果文件夹不存在则创建
+                os.makedirs(logs_dir, exist_ok=True)
+        except Exception:
+            pass  # 清理失败不影响程序启动
+
     def __init__(self):
+        # 程序启动时自动清理Logs文件夹
+        self._clear_logs_folder()
+        
         # Windows 任务栏图标有时取决于 AppUserModelID（尤其是源码用 python.exe 运行时）。
         # 提前设置它可以让任务栏/Alt-Tab 更稳定地显示自定义图标。
         if sys.platform == 'win32':

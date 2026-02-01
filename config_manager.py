@@ -240,9 +240,9 @@ class ConfigManager:
         if value in {"direct_grade", "ocr_then_grade"}:
             return value
         # 兼容UI文本或旧值
-        if value in {"识图直评", "直评", "直接评分"}:
+        if value in {"识图直评", "一 识图直评", "直评", "直接评分"}:
             return "direct_grade"
-        if value in {"识评分离","分离", "识别评分", "OCR评分"}:
+        if value in {"识评分离", "二 识评分离", "分离", "识别评分", "OCR评分"}:
             return "ocr_then_grade"
         return "direct_grade"
 
