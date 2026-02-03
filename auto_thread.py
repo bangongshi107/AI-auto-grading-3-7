@@ -1,18 +1,16 @@
-import os
 import time
 import base64
 import traceback
 import pyautogui
 import datetime
 from io import BytesIO
-from PIL import ImageGrab, Image
+from PIL import ImageGrab
 from PyQt5.QtCore import QThread, pyqtSignal
-import math
 import json
 import re
 import random
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Callable, Any, Tuple
+from typing import Optional, Callable, Tuple
 from threading import Lock
 from functools import wraps
 from enum import Enum
@@ -805,12 +803,6 @@ def unified_retry(
 
 
 
-# 函数：将数值四舍五入到指定步长的倍数（支持0.5或1.0，默认0.5）
-
-# 原有的 sanitize_score、round_to_step 函数已迁移到 ScoreProcessor 类
-# 保留了向后兼容的包装函数在类定义之后
-
-
 class GradingThread(QThread):
     # 信号定义
     log_signal = pyqtSignal(str, bool, str)
@@ -846,6 +838,8 @@ class GradingThread(QThread):
         # 如果两个API都失败，停止阅卷并请求人工介入
         self.current_api = "first"  # 默认从第一个API开始
         self.last_used_api = "first"  # 记录单评实际使用的API
+        self.last_used_ocr_api = "first"  # 记录OCR实际使用的API（识评分离）
+        self._current_response_api = None  # 当前正在处理响应的API（用于显示标签）
 
         # =================================================================
         # API短期熔断（非无人模式下提升成功率与效率）
@@ -904,6 +898,7 @@ class GradingThread(QThread):
         # JSON输出规范
         json_compliance = (
             "【JSON】\n"
+            "strict JSON only\n"
             "只输出JSON对象（不要代码块/解释），必含键：student_answer_summary, scoring_basis, itemized_scores。\n"
             "JSON键用双引号；itemized_scores为纯数字数组，长度与采分点数量一致。示例: [2, 0.5, 0]\n"
         )
@@ -1041,7 +1036,8 @@ class GradingThread(QThread):
             "2) 数学/化学/物理等符号必须原样输出，不要转为LaTeX。\n"
             "3) 无法辨认的字符用[?]占位，严禁猜测或按疑似内容补全。\n"
             "4) 若仅有涂改/擦除痕迹、涂抹、乱涂，且无法辨认任何字符/符号，readability必须为unreadable，is_blank必须为false。\n"
-            "5) 若画面为空白或仅有无意义细微痕迹但可以确认没有可识别字符，is_blank必须为true；extracted_text可为空字符串。\n\n"
+            "5) 若画面为空白或仅有无意义细微痕迹但可以确认没有可识别字符，is_blank必须为true；extracted_text必须为空字符串；readability必须为clear；notes必须为空字符串。\n"
+            "6) 除JSON外不输出任何内容，不要附加解释或思考过程。\n\n"
             "【输出格式】\n"
             "只输出JSON对象（不要代码块/解释），必须包含以下键：\n"
             "- extracted_text: 识别出的原文（字符串，可为空）\n"
@@ -1050,6 +1046,14 @@ class GradingThread(QThread):
             "- notes: 备注（可空字符串）\n"
         )
         return {"system": system_message, "user": user_prompt}
+
+    def _apply_thinking_mode(self, prompt: dict, thinking_type: str) -> dict:
+        """为提示词附加思考模式设置（仅对支持 thinking 的提供商生效）。"""
+        if not isinstance(prompt, dict):
+            return prompt
+        new_prompt = dict(prompt)
+        new_prompt["thinking"] = {"type": thinking_type}
+        return new_prompt
 
     def select_and_build_text_prompt(self, standard_answer: str, question_type: str, student_answer_text: str):
         """为识评分离模式构建纯文本评分Prompt。"""
@@ -1127,10 +1131,20 @@ class GradingThread(QThread):
         except Exception as e:
             return False, str(e)
 
-    def _call_and_process_ocr_api(self, img_str: str, prompt: dict, question_index: int):
-        """调用OCR识别API（第一组），解析结果。"""
+    def _call_and_process_ocr_api(
+        self,
+        img_str: str,
+        prompt: dict,
+        question_index: int,
+        api_call_func=None,
+        api_name: str = "OCR API",
+        api_key: Optional[str] = None
+    ) -> Tuple[Optional[str], Optional[str], Optional[bool], Optional[str], Optional[str], Optional[str]]:
+        """调用OCR识别API（指定组），解析结果。"""
+        if api_call_func is None:
+            api_call_func = self.api_service.call_first_api
         def _do_call():
-            response_text, error_from_call = self.api_service.call_first_api(img_str, prompt)
+            response_text, error_from_call = api_call_func(img_str, prompt)
             if error_from_call or not response_text:
                 raise RuntimeError(error_from_call if error_from_call else "OCR响应为空")
 
@@ -1139,14 +1153,15 @@ class GradingThread(QThread):
                 # OCR JSON 解析错误不重试
                 raise ValueError(f"OCR解析失败: {result}")
             extracted_text, readability, is_blank, notes = result
-            return extracted_text, readability, is_blank, notes, response_text
+            self._mark_api_success(api_key)
+            return extracted_text, readability, is_blank, notes, response_text, None
 
         try:
             @unified_retry(
                 max_retries=1,
                 transient_error_checker=lambda e: self._is_transient_error(str(e)),
                 log_callback=self.log_signal.emit,
-                operation_name=f"第{question_index}题OCR识别"
+                operation_name=f"第{question_index}题OCR识别({api_name})"
             )
             def _ocr_with_retry():
                 return _do_call()
@@ -1154,45 +1169,149 @@ class GradingThread(QThread):
             return _ocr_with_retry()
         except Exception as e:
             error_msg = str(e)
+            if self._is_transient_error(error_msg):
+                self._mark_api_failure(api_key)
             self.log_signal.emit(f"第{question_index}题OCR识别失败（已重试1次）: {error_msg}", True, "ERROR")
             return None, None, None, None, None, error_msg
 
-    def _call_and_process_text_grading_with_failover(self, text_prompt: dict, q_config: dict, question_index: int):
-        """工作模式二评分阶段的故障转移：优先API2，失败时降级到API1。"""
-        api_chain = [
-            ("second", self.api_service.call_second_api, "第二个API(评分)"),
-            ("first", self.api_service.call_first_api, "第一个API(评分)"),
-        ]
+    def _call_and_process_ocr_with_failover(
+        self,
+        img_str: str,
+        prompt: dict,
+        question_index: int
+    ) -> Tuple[Optional[str], Optional[str], Optional[bool], Optional[str], Optional[str], Optional[str]]:
+        """识评分离模式OCR阶段的故障转移（与工作模式一保持一致）。"""
+        api_configs = {
+            "first": {
+                "func": self.api_service.call_first_api,
+                "name": "OCR API 1",
+                "other": "second"
+            },
+            "second": {
+                "func": self.api_service.call_second_api,
+                "name": "OCR API 2",
+                "other": "first"
+            }
+        }
 
-        # 若两个API均处于熔断期，则忽略熔断以最大化成功率
-        try:
-            ignore_cooldown = all(self._is_api_in_cooldown(k) for k, _, _ in api_chain)
-        except Exception:
-            ignore_cooldown = False
-
+        attempted_apis = []
         last_error = None
 
-        for api_key, api_func, api_name in api_chain:
-            if not ignore_cooldown and self._is_api_in_cooldown(api_key):
-                self.log_signal.emit(f"{api_name}处于短期熔断，跳过本次尝试", False, "INFO")
-                continue
-            score, reasoning, itemized_scores, confidence, response_text, error = self._call_and_process_single_api(
-                api_func,
-                "",
-                text_prompt,
-                q_config,
+        for attempt in range(2):
+            current_config = api_configs[self.current_api]
+            api_func = current_config["func"]
+            api_name = current_config["name"]
+            other_api = current_config["other"]
+
+            try:
+                if self._is_api_in_cooldown(self.current_api) and not self._is_api_in_cooldown(other_api):
+                    self.log_signal.emit(f"{api_name}处于短期熔断，切换到备用API", False, "INFO")
+                    self.current_api = other_api
+                    current_config = api_configs[self.current_api]
+                    api_func = current_config["func"]
+                    api_name = current_config["name"]
+                    other_api = current_config["other"]
+            except Exception:
+                pass
+
+            attempted_apis.append(self.current_api)
+            self.log_signal.emit(f"使用{api_name}进行OCR识别...", False, "INFO")
+
+            extracted_text, readability, is_blank, notes, response_text, error = self._call_and_process_ocr_api(
+                img_str,
+                prompt,
+                question_index,
+                api_call_func=api_func,
                 api_name=api_name,
-                api_key=api_key
+                api_key=self.current_api
             )
 
             if not self.running:
                 return None, None, None, None, response_text, "线程已停止（人工介入或用户取消）"
 
             if not error:
-                self.last_used_api = api_key
+                self.last_used_ocr_api = self.current_api
+                return extracted_text, readability, is_blank, notes, response_text, None
+
+            last_error = error
+            if len(attempted_apis) == 1:
+                self.log_signal.emit(f"{api_name}失败，切换到备用API", False, "INFO")
+
+            if other_api in attempted_apis:
+                break
+
+            self.current_api = other_api
+
+        if self._schedule_unattended_retry_if_needed(str(last_error or "")):
+            return None, None, None, None, "", ""
+
+        self._stop_grading(
+            reason=StopReason.API_ERROR,
+            message="两个AI接口均失败，请检查网络或密钥配置",
+            detail="请检查: 1)网络连接 2)API密钥 3)模型ID",
+            emit_signal=False
+        )
+        self.manual_intervention_signal.emit(
+            "两个AI接口均失败",
+            "请检查: 1)网络连接 2)API密钥 3)模型ID"
+        )
+
+        return None, None, None, None, "", "两个AI接口均失败"
+
+    def _call_and_process_text_grading_with_failover(self, text_prompt: dict, q_config: dict, question_index: int):
+        """工作模式二评分阶段的故障转移（与工作模式一保持一致）。"""
+        api_configs = {
+            "first": {
+                "func": self.api_service.call_first_api,
+                "name": "API 1(评分)",
+                "other": "second"
+            },
+            "second": {
+                "func": self.api_service.call_second_api,
+                "name": "API 2(评分)",
+                "other": "first"
+            }
+        }
+
+        attempted_apis = []
+        last_error = None
+
+        for attempt in range(2):
+            current_config = api_configs[self.current_api]
+            api_func = current_config["func"]
+            api_name = current_config["name"]
+            other_api = current_config["other"]
+
+            try:
+                if self._is_api_in_cooldown(self.current_api) and not self._is_api_in_cooldown(other_api):
+                    self.log_signal.emit(f"{api_name}处于短期熔断，切换到备用API", False, "INFO")
+                    self.current_api = other_api
+                    current_config = api_configs[self.current_api]
+                    api_func = current_config["func"]
+                    api_name = current_config["name"]
+                    other_api = current_config["other"]
+            except Exception:
+                pass
+
+            attempted_apis.append(self.current_api)
+            self.log_signal.emit(f"使用{api_name}进行评分...", False, "INFO")
+
+            score, reasoning, itemized_scores, confidence, response_text, error = self._call_and_process_single_api(
+                api_func,
+                "",
+                text_prompt,
+                q_config,
+                api_name=api_name,
+                api_key=self.current_api
+            )
+
+            if not self.running:
+                return None, None, None, None, response_text, "线程已停止（人工介入或用户取消）"
+
+            if not error:
+                self.last_used_api = self.current_api
                 return score, reasoning, itemized_scores, confidence, response_text, None
 
-            # 异常试卷或人工介入：直接返回
             if isinstance(error, dict) and error.get('anomaly_paper'):
                 return None, None, None, None, response_text, error
 
@@ -1200,9 +1319,29 @@ class GradingThread(QThread):
                 return None, None, None, None, response_text, error
 
             last_error = error
-            self.log_signal.emit(f"{api_name}评分失败，尝试备用API", False, "INFO")
+            if len(attempted_apis) == 1:
+                self.log_signal.emit(f"{api_name}评分失败，切换到备用API", False, "INFO")
 
-        return None, None, None, None, None, f"评分失败（已尝试两个API）: {last_error}"
+            if other_api in attempted_apis:
+                break
+
+            self.current_api = other_api
+
+        if self._schedule_unattended_retry_if_needed(str(last_error or "")):
+            return None, None, None, None, "", ""
+
+        self._stop_grading(
+            reason=StopReason.API_ERROR,
+            message="两个AI接口均失败，请检查网络或密钥配置",
+            detail="请检查: 1)网络连接 2)API密钥 3)模型ID",
+            emit_signal=False
+        )
+        self.manual_intervention_signal.emit(
+            "两个AI接口均失败",
+            "请检查: 1)网络连接 2)API密钥 3)模型ID"
+        )
+
+        return None, None, None, None, "", f"评分失败（已尝试两个API）: {last_error}"
 
     def _is_unrecognizable_answer(self, student_answer_summary, itemized_scores):
         """
@@ -1706,6 +1845,8 @@ class GradingThread(QThread):
 
         # 获取工作模式
         work_mode = q_config.get('work_mode', 'direct_grade')
+        is_split_mode = work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking'}
+        is_thinking_mode = work_mode in {'direct_grade_thinking', 'ocr_then_grade_thinking'}
         ocr_text = None
         ocr_raw_response = None
 
@@ -1715,7 +1856,7 @@ class GradingThread(QThread):
             return False
 
         # 构建Prompt并调用API评分
-        if work_mode == 'ocr_then_grade':
+        if is_split_mode:
             if dual_evaluation:
                 self.log_signal.emit(
                     f"第 {question_index} 题为识评分离模式，已自动忽略双评设置",
@@ -1723,20 +1864,9 @@ class GradingThread(QThread):
                     "WARNING"
                 )
             ocr_prompt = self._build_ocr_prompt()
-            ocr_result = self._call_and_process_ocr_api(img_str, ocr_prompt, question_index)
-            # 兼容性处理：有的返回路径可能返回5个值（旧实现），有的返回6个值（包含ocr_error）
-            if isinstance(ocr_result, tuple):
-                if len(ocr_result) == 6:
-                    extracted_text, readability, is_blank, notes, ocr_raw_response, ocr_error = ocr_result
-                elif len(ocr_result) == 5:
-                    extracted_text, readability, is_blank, notes, ocr_raw_response = ocr_result
-                    ocr_error = None
-                else:
-                    extracted_text = readability = is_blank = notes = ocr_raw_response = None
-                    ocr_error = f"OCR返回值格式错误(len={len(ocr_result)})"
-            else:
-                extracted_text = readability = is_blank = notes = ocr_raw_response = None
-                ocr_error = "OCR返回值非元组"
+            ocr_prompt = self._apply_thinking_mode(ocr_prompt, "disabled")
+            ocr_result = self._call_and_process_ocr_with_failover(img_str, ocr_prompt, question_index)
+            extracted_text, readability, is_blank, notes, ocr_raw_response, ocr_error = ocr_result
 
             if ocr_error:
                 self._set_error_state(
@@ -1781,6 +1911,11 @@ class GradingThread(QThread):
                 if text_prompt_for_api is None:
                     return self.running
 
+                text_prompt_for_api = self._apply_thinking_mode(
+                    text_prompt_for_api,
+                    "enabled" if is_thinking_mode else "disabled"
+                )
+
                 score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response, error_info = self._call_and_process_text_grading_with_failover(
                     text_prompt_for_api,
                     q_config,
@@ -1801,12 +1936,16 @@ class GradingThread(QThread):
                     )
                     return False
 
-                self.last_used_api = "second"
                 eval_result = (score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response)
         else:
             text_prompt_for_api = self.select_and_build_prompt(standard_answer, question_type)
             if text_prompt_for_api is None:
                 return self.running  # 如果running为False则停止，否则继续下一题
+
+            text_prompt_for_api = self._apply_thinking_mode(
+                text_prompt_for_api,
+                "enabled" if is_thinking_mode else "disabled"
+            )
 
             eval_result = self.evaluate_answer(
                 img_str, text_prompt_for_api, q_config, dual_evaluation, score_diff_threshold
@@ -2327,6 +2466,7 @@ class GradingThread(QThread):
         # 重置API故障转移状态（每次新的阅卷任务开始时）
         self.current_api = "first"  # 重置为从第一个API开始
         self.last_used_api = "first"
+        self.last_used_ocr_api = "first"
 
     def stop(self):
         """停止线程（用户手动停止）
@@ -2703,7 +2843,11 @@ class GradingThread(QThread):
                 # 简化：只抛出异常，不记录日志（由外层统一处理）
                 raise RuntimeError(error_from_call if error_from_call else "响应为空")
 
-            success, result_data = self.process_api_response((response_text, None), q_config)
+            self._current_response_api = api_key
+            try:
+                success, result_data = self.process_api_response((response_text, None), q_config)
+            finally:
+                self._current_response_api = None
 
             if success:
                 score, reasoning, itemized_scores, confidence = result_data
@@ -2991,53 +3135,37 @@ class GradingThread(QThread):
             if self._is_unrecognizable_answer(student_answer_summary, itemized_scores_from_json):
                 error_msg = f"学生答案图片无法识别，停止阅卷。请检查图片质量或手动处理。AI反馈: {student_answer_summary}"
                 self.log_signal.emit(error_msg, True, "ERROR")
-                return False, error_msg
+                self._stop_grading(
+                    reason=StopReason.MANUAL_INTERVENTION,
+                    message="学生答案图片无法识别，需要人工处理",
+                    detail=student_answer_summary if student_answer_summary else "",
+                    emit_signal=True,
+                    log_level="ERROR"
+                )
+                return False, {
+                    'manual_intervention': True,
+                    'message': "学生答案图片无法识别，需要人工处理",
+                    'raw_feedback': student_answer_summary,
+                    'already_logged': True
+                }
 
             # 检查AI是否在请求提供学生答案图片内容，如果是则停止阅卷并等待用户介入
             if self._is_ai_requesting_image_content(student_answer_summary, scoring_basis):
                 error_msg = f"AI无法从图片中提取有效信息，停止阅卷并等待用户手动介入。AI反馈摘要: {student_answer_summary}"
                 self.log_signal.emit(error_msg, True, "ERROR")
-                return False, error_msg
-
-            # =====================================================================
-            # 【方案B备用】基于 AI 输出的 decision 字段进行决策
-            # 启用方式：取消下方注释，并注释掉上方"方案A"代码块
-            # =====================================================================
-            # decision = data.get("decision", "manual_required")  # 默认保守
-            # valid_decisions = {"score", "zero_blank", "manual_required"}
-            # 
-            # if decision not in valid_decisions:
-            #     self.log_signal.emit(f"AI返回无效decision值'{decision}'，按manual_required处理", False, "WARNING")
-            #     decision = "manual_required"
-            # 
-            # self.log_signal.emit(f"AI决策: {decision}", False, "DETAIL")
-            #
-            # # --- decision == "manual_required": 需人工介入，立即停止 ---
-            # if decision == "manual_required":
-            #     reason = scoring_basis if scoring_basis else "AI判断需要人工介入"
-            #     display_text = student_answer_summary if student_answer_summary else ""
-            #     self.log_signal.emit(f"AI请求人工介入: {reason[:100]}", True, "ERROR")
-            #     self.manual_intervention_signal.emit("AI决策: 需人工介入", display_text)
-            #     return False, {'manual_intervention': True, 'message': reason, 'raw_feedback': display_text}
-            #
-            # # --- decision == "zero_blank": 白卷/无效作答，自动判0分并继续 ---
-            # if decision == "zero_blank":
-            #     self.log_signal.emit("AI决策: 白卷/无效作答，自动判0分", False, "INFO")
-            #     if isinstance(itemized_scores_from_json, list) and itemized_scores_from_json:
-            #         itemized_scores_from_json = [0 for _ in itemized_scores_from_json]
-            #     else:
-            #         itemized_scores_from_json = [0]
-            #     if not student_answer_summary:
-            #         student_answer_summary = "白卷/无有效作答"
-            #     if not scoring_basis or scoring_basis == "未能提取评分依据":
-            #         scoring_basis = "AI判定：学生答案为空白或无有效作答内容，本题判0分。"
-            #
-            # # --- decision == "score": 正常评分流程，兜底检测 ---
-            # if decision == "score":
-            #     if self._is_ai_requesting_image_content(student_answer_summary, scoring_basis):
-            #         error_msg = f"AI声称正常评分但同时请求图片，疑似系统故障。AI反馈: {student_answer_summary}"
-            #         self.log_signal.emit(error_msg, True, "ERROR")
-            #         return False, {'manual_intervention': True, 'message': error_msg, 'raw_feedback': student_answer_summary}
+                self._stop_grading(
+                    reason=StopReason.MANUAL_INTERVENTION,
+                    message="AI无法从图片中提取有效信息，需要人工处理",
+                    detail=student_answer_summary if student_answer_summary else "",
+                    emit_signal=True,
+                    log_level="ERROR"
+                )
+                return False, {
+                    'manual_intervention': True,
+                    'message': "AI无法从图片中提取有效信息，需要人工处理",
+                    'raw_feedback': student_answer_summary,
+                    'already_logged': True
+                }
 
             calculated_total_score = 0.0
             numeric_scores_list_for_return = []
@@ -3077,15 +3205,21 @@ class GradingThread(QThread):
 
             # 合并展示：总分 + 评分依据（首行作为UI标题）
             work_mode = current_question_config.get('work_mode', 'direct_grade')
-            mode_label = "直评" if work_mode != 'ocr_then_grade' else "分离"
+            mode_label_map = {
+                'direct_grade': "直评",
+                'direct_grade_thinking': "直评+推理",
+                'ocr_then_grade': "分离",
+                'ocr_then_grade_thinking': "分离+推理"
+            }
+            mode_label = mode_label_map.get(work_mode, "直评")
             api_label = ""
-            if work_mode != 'ocr_then_grade':
-                if self.last_used_api == "dual":
-                    api_label = " - AI 1/AI 2"
-                elif self.last_used_api == "second":
-                    api_label = " - AI 2"
-                else:
-                    api_label = " - AI 1"
+            api_source = self._current_response_api or self.last_used_api
+            if api_source == "dual":
+                api_label = " - AI 1/AI 2"
+            elif api_source == "second":
+                api_label = " - AI 2"
+            else:
+                api_label = " - AI 1"
             header = f"【总分 {final_score} 分 - {mode_label}{api_label} - AI评分依据如下】"
             basis_text = scoring_basis.strip() if isinstance(scoring_basis, str) else str(scoring_basis)
             display_text = f"{header}\n{basis_text}" if basis_text else header
@@ -3218,50 +3352,20 @@ class GradingThread(QThread):
                 continue
 
         # 识别失败/乱码等：默认人工，但允许用户配置为0分
+        # 为避免“无法识别网络信息真假”等语义误触发，仅当与“作答/图片/OCR”等上下文共现时才触发
         if gibberish_policy != 'zero':
             soft_patterns = [
                 r'无法识别', r'识别失败', r'识别错误', r'乱码', r'噪声太大', r'\bunclear\b'
             ]
+            context_terms = r'(答案|作答|图片|图像|试卷|卷面|字迹|手写|OCR|内容)'
             for p in soft_patterns:
                 try:
-                    if re.search(p, s):
+                    # 仅当“识别失败类词语”与上下文共现才触发
+                    if re.search(p, s) and re.search(context_terms, s):
                         m = re.search(p, s)
                         return m.group(0) if m is not None else p
                 except re.error:
                     continue
-
-        return None
-
-    def _detect_anomaly_paper_feedback(self, student_answer_summary: str, scoring_basis: str) -> Optional[str]:
-        """
-        检测AI返回的摘要或评分依据中是否包含指示"异常试卷"的信号。
-        返回匹配到的简短消息（str）或None表示未检测到。
-        
-        异常试卷关键词包括：异常试卷、缺考、无效试卷、图片为空等。
-        注意：空白/未作答/无有效作答默认应判0分而非异常卷（可通过配置切换）。
-        """
-        if not student_answer_summary and not scoring_basis:
-            return None
-
-        combined = " ".join([str(student_answer_summary or ""), str(scoring_basis or "")])
-        s = combined.lower()
-
-        # 异常试卷相关的检测模式
-        anomaly_patterns = [
-            r'异常试卷', r'异常卷',
-            r'缺考', r'缺席', r'弃考', r'无效试卷', r'无效答卷',
-            r'图像为空', r'图片为空', r'空白图像', r'空白图片',
-            r'blank\s*(?:paper|sheet)', r'empty\s*(?:paper|sheet)',
-            r'absent', r'missing\s*answer'
-        ]
-
-        for p in anomaly_patterns:
-            try:
-                if re.search(p, s):
-                    m = re.search(p, s)
-                    return m.group(0) if m is not None else p
-            except re.error:
-                continue
 
         return None
 
@@ -3570,10 +3674,19 @@ class GradingThread(QThread):
                 'total_questions_in_run': self.total_question_count_in_run,
                 'scoring_rubric_summary': scoring_rubric_summary,
                 'work_mode': work_mode,
-                'work_mode_display': '识评分离' if work_mode == 'ocr_then_grade' else '识图直评',
+                'work_mode_display': {
+                    'direct_grade': '识图直评',
+                    'direct_grade_thinking': '直评+推理',
+                    'ocr_then_grade': '识评分离',
+                    'ocr_then_grade_thinking': '分离+推理'
+                }.get(work_mode, '识图直评'),
                 'ocr_text': ocr_text if ocr_text is not None else "",
                 'ocr_raw_response': ocr_raw_response if ocr_raw_response is not None else "",
-                'ocr_model_id': self.first_model_id if work_mode == 'ocr_then_grade' else "",
+                'ocr_model_id': (
+                    self.second_model_id
+                    if work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking'} and getattr(self, 'last_used_ocr_api', 'first') == 'second'
+                    else (self.first_model_id if work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking'} else "")
+                ),
             }
 
             # 2. 根据模式填充特定字段

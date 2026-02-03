@@ -88,7 +88,7 @@ class ConfigManager:
                 'enable_anomaly_button': False,  # 异常卷按钮开关
                 'anomaly_button_pos': None,  # 异常卷按钮位置
                 'question_type': 'Subjective_PointBased_QA',
-                'work_mode': 'direct_grade',  # 识图直评 / 识评分离
+                'work_mode': 'direct_grade',  # 识图直评 / 直评+推理 / 识评分离 / 分离+推理
                 'score_rounding_step': 0.5,  # 每题独立步长，默认0.5
             }
             if is_q1:
@@ -237,13 +237,17 @@ class ConfigManager:
         value = str(raw_value).strip() if raw_value is not None else ""
         if not value:
             return "direct_grade"
-        if value in {"direct_grade", "ocr_then_grade"}:
+        if value in {"direct_grade", "direct_grade_thinking", "ocr_then_grade", "ocr_then_grade_thinking"}:
             return value
         # 兼容UI文本或旧值
         if value in {"识图直评", "一 识图直评", "直评", "直接评分"}:
             return "direct_grade"
-        if value in {"识评分离", "二 识评分离", "分离", "识别评分", "OCR评分"}:
+        if value in {"直评+推理", "二 直评+推理", "二直评+推理", "直评推理"}:
+            return "direct_grade_thinking"
+        if value in {"识评分离", "三 识评分离", "三识评分离", "二 识评分离", "分离", "识别评分", "OCR评分"}:
             return "ocr_then_grade"
+        if value in {"分离+推理", "四 分离+推理", "四分离+推理", "识评分离+推理", "分离推理"}:
+            return "ocr_then_grade_thinking"
         return "direct_grade"
 
     def _get_config_safe(self, section, option, default_value, value_type: type = str):

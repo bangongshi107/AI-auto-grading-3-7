@@ -486,7 +486,9 @@ class MainWindow(QMainWindow):
                 normalized_text = self._normalize_work_mode_ui_text(ui_text)
                 mode_map = {
                     '识图直评': 'direct_grade',
-                    '识评分离': 'ocr_then_grade'
+                    '直评+推理': 'direct_grade_thinking',
+                    '识评分离': 'ocr_then_grade',
+                    '分离+推理': 'ocr_then_grade_thinking'
                 }
                 work_mode = mode_map.get(normalized_text, 'direct_grade')
             field_name = f"question_{q_index}_work_mode"
@@ -522,12 +524,16 @@ class MainWindow(QMainWindow):
             if self._autosave_timer is None:
                 self._autosave_timer = QTimer(self)
                 self._autosave_timer.setInterval(60000)  # 60秒一次
-                self._autosave_timer.timeout.connect(lambda: self._flush_config_to_file("autosave"))
+                self._autosave_timer.timeout.connect(self._autosave_handler)
             if not self._autosave_timer.isActive():
                 self._autosave_timer.start()
         except Exception:
             # 定时器异常不影响主流程
             pass
+    
+    def _autosave_handler(self) -> None:
+        """自动保存定时器的槽函数，确保返回类型为 None。"""
+        self._flush_config_to_file("autosave")
 
     def _mark_config_dirty(self, reason: str = "") -> None:
         """标记当前配置有变更，仅保存到内存，等待定时/关键操作落盘。"""
@@ -663,7 +669,10 @@ class MainWindow(QMainWindow):
             if work_mode_combo and isinstance(work_mode_combo, QComboBox):
                 work_mode_combo.clear()
                 work_mode_combo.addItem("一 识图直评", "direct_grade")
-                work_mode_combo.addItem("二 识评分离", "ocr_then_grade")
+                work_mode_combo.addItem("二 直评+推理", "direct_grade_thinking")
+                work_mode_combo.addItem("三 识评分离", "ocr_then_grade")
+                work_mode_combo.addItem("四 分离+推理", "ocr_then_grade_thinking")
+                work_mode_combo.setToolTip("识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI识别文字后评分；分离+推理：识别不推理、评分开启推理")
 
         self.load_config_to_ui()
         self._connect_signals() # <--- 在这里统一调用
@@ -777,7 +786,13 @@ class MainWindow(QMainWindow):
                     if index >= 0:
                         work_mode_combo.setCurrentIndex(index)
                     else:
-                        display_text = '二 识评分离' if work_mode_value == 'ocr_then_grade' else '一 识图直评'
+                        display_text_map = {
+                            'direct_grade': '一 识图直评',
+                            'direct_grade_thinking': '二 直评+推理',
+                            'ocr_then_grade': '三 识评分离',
+                            'ocr_then_grade_thinking': '四 分离+推理'
+                        }
+                        display_text = display_text_map.get(work_mode_value, '一 识图直评')
                         work_mode_combo.setCurrentText(display_text)
                 
 
@@ -907,7 +922,7 @@ class MainWindow(QMainWindow):
             if dual_evaluation:
                 for q_idx in enabled_questions_indices:
                     q_cfg = self.config_manager.get_question_config(q_idx)
-                    if q_cfg.get('work_mode') == 'ocr_then_grade':
+                    if q_cfg.get('work_mode') in {'ocr_then_grade', 'ocr_then_grade_thinking'}:
                         dual_evaluation = False
                         dual_eval_checkbox = self.get_ui_element('dualEvaluationCheckbox')
                         if dual_eval_checkbox:
@@ -1170,13 +1185,20 @@ class MainWindow(QMainWindow):
                 if work_mode_combo and isinstance(work_mode_combo, QComboBox):
                     mode_value = work_mode_combo.currentData()
                     if not mode_value:
-                        mode_value = 'ocr_then_grade' if self._normalize_work_mode_ui_text(work_mode_combo.currentText()) == '识评分离' else 'direct_grade'
-                    if mode_value == 'ocr_then_grade':
+                        normalized = self._normalize_work_mode_ui_text(work_mode_combo.currentText())
+                        fallback_map = {
+                            '识图直评': 'direct_grade',
+                            '直评+推理': 'direct_grade_thinking',
+                            '识评分离': 'ocr_then_grade',
+                            '分离+推理': 'ocr_then_grade_thinking'
+                        }
+                        mode_value = fallback_map.get(normalized, 'direct_grade')
+                    if mode_value in {'ocr_then_grade', 'ocr_then_grade_thinking'}:
                         has_ocr_then_grade = True
                         break
                 else:
                     q_cfg = self.config_manager.get_question_config(q_idx)
-                    if q_cfg.get('work_mode') == 'ocr_then_grade':
+                    if q_cfg.get('work_mode') in {'ocr_then_grade', 'ocr_then_grade_thinking'}:
                         has_ocr_then_grade = True
                         break
         except Exception:
@@ -1242,7 +1264,9 @@ class MainWindow(QMainWindow):
         try:
             mode_map = {
                 '识图直评': 'direct_grade',
-                '识评分离': 'ocr_then_grade'
+                '直评+推理': 'direct_grade_thinking',
+                '识评分离': 'ocr_then_grade',
+                '分离+推理': 'ocr_then_grade_thinking'
             }
             for i in range(1, self.max_questions + 1):
                 work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
@@ -1259,7 +1283,7 @@ class MainWindow(QMainWindow):
     def _normalize_work_mode_ui_text(self, ui_text: str) -> str:
         """将工作模式下拉框显示文本标准化为核心关键字。"""
         text = str(ui_text).strip() if ui_text is not None else ""
-        if text.startswith("一") or text.startswith("二"):
+        if text and text[0] in "一二三四":
             text = text[1:].strip()
         return text
     
@@ -1437,34 +1461,6 @@ class MainWindow(QMainWindow):
         element = self.get_ui_element(element_name)
         if element:
             element.setEnabled(enabled)
-    
-    def _safe_get_spinbox(self, element_name: str) -> Union[QSpinBox, None]:
-        """获取并强制转换为QSpinBox"""
-        element = self.get_ui_element(element_name)
-        if element and isinstance(element, QSpinBox):
-            return element
-        return None
-    
-    def _safe_get_checkbox(self, element_name: str) -> Union[QCheckBox, None]:
-        """获取并强制转换为QCheckBox"""
-        element = self.get_ui_element(element_name)
-        if element and isinstance(element, QCheckBox):
-            return element
-        return None
-    
-    def _safe_get_combobox(self, element_name: str) -> Union[QComboBox, None]:
-        """获取并强制转换为QComboBox"""
-        element = self.get_ui_element(element_name)
-        if element and isinstance(element, QComboBox):
-            return element
-        return None
-    
-    def _safe_get_lineedit(self, element_name: str) -> Union[QLineEdit, None]:
-        """获取并强制转换为QLineEdit"""
-        element = self.get_ui_element(element_name)
-        if element and isinstance(element, QLineEdit):
-            return element
-        return None
         
     def open_question_config_dialog(self, question_index):
         # 延迟导入以避免循环依赖
@@ -1577,12 +1573,6 @@ class MainWindow(QMainWindow):
             self.log_message("无人模式已启用：两个API都失败时将自动重试，直到成功或达到最大重试次数")
         else:
             self.log_message("无人模式已禁用：两个API都失败时将立即停止并等待人工介入")
-
-
-    def on_subject_changed(self, index):
-        # 此函数在我的重构中未直接使用，但如果您需要它，可以这样实现
-        combo = self.sender()
-        if combo and isinstance(combo, QComboBox): self.handle_comboBox_save('subject', combo.currentText())
 
     def _connect_signals(self):
         """统一连接所有UI控件的信号与槽"""

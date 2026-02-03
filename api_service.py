@@ -592,9 +592,17 @@ class ApiService:
         # 支持 prompt 为字符串或 {system,user} 结构
         system_text = ""
         user_text = ""
+        thinking_cfg = {"type": "disabled"}
         if isinstance(prompt, dict):
             system_text = str(prompt.get("system", "") or "")
             user_text = str(prompt.get("user", "") or "")
+            raw_thinking = prompt.get("thinking")
+            if raw_thinking:
+                if isinstance(raw_thinking, dict):
+                    thinking_type = raw_thinking.get("type") or raw_thinking.get("mode") or raw_thinking.get("value")
+                    thinking_cfg = {"type": str(thinking_type)} if thinking_type else raw_thinking
+                elif isinstance(raw_thinking, str):
+                    thinking_cfg = {"type": raw_thinking}
         else:
             user_text = str(prompt)
 
@@ -643,9 +651,13 @@ class ApiService:
         """
         system_text = ""
         user_text = ""
+        thinking_cfg = {"type": "disabled"}
         if isinstance(prompt, dict):
             system_text = str(prompt.get("system", "") or "")
             user_text = str(prompt.get("user", "") or "")
+            prompt_thinking = prompt.get("thinking")
+            if isinstance(prompt_thinking, dict) and prompt_thinking.get("type"):
+                thinking_cfg = prompt_thinking
         else:
             user_text = str(prompt)
 
@@ -656,7 +668,12 @@ class ApiService:
         if not img_str:
             # 纯文本模式
             messages.append({"role": "user", "content": user_text})
-            return {"model": model_id, "messages": messages, "max_tokens": 4096}
+            return {
+                "model": model_id,
+                "messages": messages,
+                "max_tokens": 4096,
+                "thinking": thinking_cfg
+            }
 
         # 视觉模式 - AI改卷专用配置
         # 按照火山引擎官方文档：image在前，text在后
@@ -674,7 +691,12 @@ class ApiService:
                 {"type": "text", "text": user_text}
             ]
         })
-        return {"model": model_id, "messages": messages, "max_tokens": 4096}
+        return {
+            "model": model_id,
+            "messages": messages,
+            "max_tokens": 4096,
+            "thinking": thinking_cfg
+        }
 
 
 
@@ -821,49 +843,3 @@ class ApiService:
         """
         pass
 
-    def validate_provider_configuration(self) -> Dict[str, Any]:
-        """
-        验证所有配置的API提供商是否有完整的实现
-        
-        Returns:
-            Dict: 验证结果，包含每个提供商的实现状态
-        """
-        validation_results = {}
-        
-        for provider_id, config in PROVIDER_CONFIGS.items():
-            result = {
-                "provider_id": provider_id,
-                "name": config.get("name", "未命名"),
-                "has_url": bool(config.get("url")),
-                "has_auth_method": bool(config.get("auth_method")),
-                "has_payload_builder": bool(config.get("payload_builder")),
-                "payload_builder_exists": False,
-                "response_parser_exists": False,
-                "is_complete": False
-            }
-            
-            # 检查payload构建器是否存在
-            builder_name = config.get("payload_builder", "")
-            if builder_name and hasattr(self, builder_name):
-                result["payload_builder_exists"] = True
-            
-            # 检查响应解析器是否支持该提供商
-            # 通过检查 _extract_response_content 中是否有该provider的处理
-            supported_providers = [
-                "openai", "moonshot", "openrouter", "zhipu", "volcengine", 
-                "aliyun", "baidu", "tencent", "gemini"
-            ]
-            result["response_parser_exists"] = provider_id in supported_providers
-            
-            # 判断是否完整
-            result["is_complete"] = (
-                result["has_url"] and 
-                result["has_auth_method"] and 
-                result["has_payload_builder"] and 
-                result["payload_builder_exists"] and 
-                result["response_parser_exists"]
-            )
-            
-            validation_results[provider_id] = result
-        
-        return validation_results
