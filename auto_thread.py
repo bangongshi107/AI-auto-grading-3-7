@@ -898,7 +898,6 @@ class GradingThread(QThread):
         # JSON输出规范
         json_compliance = (
             "【JSON】\n"
-            "strict JSON only\n"
             "只输出JSON对象（不要代码块/解释），必含键：student_answer_summary, scoring_basis, itemized_scores。\n"
             "JSON键用双引号；itemized_scores为纯数字数组，长度与采分点数量一致。示例: [2, 0.5, 0]\n"
         )
@@ -1036,8 +1035,7 @@ class GradingThread(QThread):
             "2) 数学/化学/物理等符号必须原样输出，不要转为LaTeX。\n"
             "3) 无法辨认的字符用[?]占位，严禁猜测或按疑似内容补全。\n"
             "4) 若仅有涂改/擦除痕迹、涂抹、乱涂，且无法辨认任何字符/符号，readability必须为unreadable，is_blank必须为false。\n"
-            "5) 若画面为空白或仅有无意义细微痕迹但可以确认没有可识别字符，is_blank必须为true；extracted_text必须为空字符串；readability必须为clear；notes必须为空字符串。\n"
-            "6) 除JSON外不输出任何内容，不要附加解释或思考过程。\n\n"
+            "5) 若画面为空白或仅有无意义细微痕迹但可以确认没有可识别字符，is_blank必须为true；extracted_text可为空字符串。\n\n"
             "【输出格式】\n"
             "只输出JSON对象（不要代码块/解释），必须包含以下键：\n"
             "- extracted_text: 识别出的原文（字符串，可为空）\n"
@@ -1845,8 +1843,9 @@ class GradingThread(QThread):
 
         # 获取工作模式
         work_mode = q_config.get('work_mode', 'direct_grade')
-        is_split_mode = work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking'}
-        is_thinking_mode = work_mode in {'direct_grade_thinking', 'ocr_then_grade_thinking'}
+        is_split_mode = work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'}
+        ocr_thinking_enabled = work_mode == 'ocr_then_grade_dual_thinking'
+        grade_thinking_enabled = work_mode in {'direct_grade_thinking', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'}
         ocr_text = None
         ocr_raw_response = None
 
@@ -1864,7 +1863,10 @@ class GradingThread(QThread):
                     "WARNING"
                 )
             ocr_prompt = self._build_ocr_prompt()
-            ocr_prompt = self._apply_thinking_mode(ocr_prompt, "disabled")
+            ocr_prompt = self._apply_thinking_mode(
+                ocr_prompt,
+                "enabled" if ocr_thinking_enabled else "disabled"
+            )
             ocr_result = self._call_and_process_ocr_with_failover(img_str, ocr_prompt, question_index)
             extracted_text, readability, is_blank, notes, ocr_raw_response, ocr_error = ocr_result
 
@@ -1913,7 +1915,7 @@ class GradingThread(QThread):
 
                 text_prompt_for_api = self._apply_thinking_mode(
                     text_prompt_for_api,
-                    "enabled" if is_thinking_mode else "disabled"
+                    "enabled" if grade_thinking_enabled else "disabled"
                 )
 
                 score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response, error_info = self._call_and_process_text_grading_with_failover(
@@ -1944,7 +1946,7 @@ class GradingThread(QThread):
 
             text_prompt_for_api = self._apply_thinking_mode(
                 text_prompt_for_api,
-                "enabled" if is_thinking_mode else "disabled"
+                "enabled" if grade_thinking_enabled else "disabled"
             )
 
             eval_result = self.evaluate_answer(
@@ -3209,7 +3211,8 @@ class GradingThread(QThread):
                 'direct_grade': "直评",
                 'direct_grade_thinking': "直评+推理",
                 'ocr_then_grade': "分离",
-                'ocr_then_grade_thinking': "分离+推理"
+                'ocr_then_grade_thinking': "分离+推理",
+                'ocr_then_grade_dual_thinking': "分离+双推理"
             }
             mode_label = mode_label_map.get(work_mode, "直评")
             api_label = ""
@@ -3352,16 +3355,13 @@ class GradingThread(QThread):
                 continue
 
         # 识别失败/乱码等：默认人工，但允许用户配置为0分
-        # 为避免“无法识别网络信息真假”等语义误触发，仅当与“作答/图片/OCR”等上下文共现时才触发
         if gibberish_policy != 'zero':
             soft_patterns = [
                 r'无法识别', r'识别失败', r'识别错误', r'乱码', r'噪声太大', r'\bunclear\b'
             ]
-            context_terms = r'(答案|作答|图片|图像|试卷|卷面|字迹|手写|OCR|内容)'
             for p in soft_patterns:
                 try:
-                    # 仅当“识别失败类词语”与上下文共现才触发
-                    if re.search(p, s) and re.search(context_terms, s):
+                    if re.search(p, s):
                         m = re.search(p, s)
                         return m.group(0) if m is not None else p
                 except re.error:
@@ -3678,14 +3678,15 @@ class GradingThread(QThread):
                     'direct_grade': '识图直评',
                     'direct_grade_thinking': '直评+推理',
                     'ocr_then_grade': '识评分离',
-                    'ocr_then_grade_thinking': '分离+推理'
+                    'ocr_then_grade_thinking': '分离+推理',
+                    'ocr_then_grade_dual_thinking': '分离+双推理'
                 }.get(work_mode, '识图直评'),
                 'ocr_text': ocr_text if ocr_text is not None else "",
                 'ocr_raw_response': ocr_raw_response if ocr_raw_response is not None else "",
                 'ocr_model_id': (
                     self.second_model_id
-                    if work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking'} and getattr(self, 'last_used_ocr_api', 'first') == 'second'
-                    else (self.first_model_id if work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking'} else "")
+                    if work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'} and getattr(self, 'last_used_ocr_api', 'first') == 'second'
+                    else (self.first_model_id if work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'} else "")
                 ),
             }
 

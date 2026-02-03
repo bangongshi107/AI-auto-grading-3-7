@@ -488,7 +488,8 @@ class MainWindow(QMainWindow):
                     '识图直评': 'direct_grade',
                     '直评+推理': 'direct_grade_thinking',
                     '识评分离': 'ocr_then_grade',
-                    '分离+推理': 'ocr_then_grade_thinking'
+                    '分离+推理': 'ocr_then_grade_thinking',
+                    '分离+双推理': 'ocr_then_grade_dual_thinking'
                 }
                 work_mode = mode_map.get(normalized_text, 'direct_grade')
             field_name = f"question_{q_index}_work_mode"
@@ -672,7 +673,8 @@ class MainWindow(QMainWindow):
                 work_mode_combo.addItem("二 直评+推理", "direct_grade_thinking")
                 work_mode_combo.addItem("三 识评分离", "ocr_then_grade")
                 work_mode_combo.addItem("四 分离+推理", "ocr_then_grade_thinking")
-                work_mode_combo.setToolTip("识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI识别文字后评分；分离+推理：识别不推理、评分开启推理")
+                work_mode_combo.addItem("五 分离+双推理", "ocr_then_grade_dual_thinking")
+                work_mode_combo.setToolTip("识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI识别文字后评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理")
 
         self.load_config_to_ui()
         self._connect_signals() # <--- 在这里统一调用
@@ -790,7 +792,8 @@ class MainWindow(QMainWindow):
                             'direct_grade': '一 识图直评',
                             'direct_grade_thinking': '二 直评+推理',
                             'ocr_then_grade': '三 识评分离',
-                            'ocr_then_grade_thinking': '四 分离+推理'
+                            'ocr_then_grade_thinking': '四 分离+推理',
+                            'ocr_then_grade_dual_thinking': '五 分离+双推理'
                         }
                         display_text = display_text_map.get(work_mode_value, '一 识图直评')
                         work_mode_combo.setCurrentText(display_text)
@@ -922,7 +925,7 @@ class MainWindow(QMainWindow):
             if dual_evaluation:
                 for q_idx in enabled_questions_indices:
                     q_cfg = self.config_manager.get_question_config(q_idx)
-                    if q_cfg.get('work_mode') in {'ocr_then_grade', 'ocr_then_grade_thinking'}:
+                    if q_cfg.get('work_mode') in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'}:
                         dual_evaluation = False
                         dual_eval_checkbox = self.get_ui_element('dualEvaluationCheckbox')
                         if dual_eval_checkbox:
@@ -1190,15 +1193,16 @@ class MainWindow(QMainWindow):
                             '识图直评': 'direct_grade',
                             '直评+推理': 'direct_grade_thinking',
                             '识评分离': 'ocr_then_grade',
-                            '分离+推理': 'ocr_then_grade_thinking'
+                            '分离+推理': 'ocr_then_grade_thinking',
+                            '分离+双推理': 'ocr_then_grade_dual_thinking'
                         }
                         mode_value = fallback_map.get(normalized, 'direct_grade')
-                    if mode_value in {'ocr_then_grade', 'ocr_then_grade_thinking'}:
+                    if mode_value in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'}:
                         has_ocr_then_grade = True
                         break
                 else:
                     q_cfg = self.config_manager.get_question_config(q_idx)
-                    if q_cfg.get('work_mode') in {'ocr_then_grade', 'ocr_then_grade_thinking'}:
+                    if q_cfg.get('work_mode') in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'}:
                         has_ocr_then_grade = True
                         break
         except Exception:
@@ -1266,7 +1270,8 @@ class MainWindow(QMainWindow):
                 '识图直评': 'direct_grade',
                 '直评+推理': 'direct_grade_thinking',
                 '识评分离': 'ocr_then_grade',
-                '分离+推理': 'ocr_then_grade_thinking'
+                '分离+推理': 'ocr_then_grade_thinking',
+                '分离+双推理': 'ocr_then_grade_dual_thinking'
             }
             for i in range(1, self.max_questions + 1):
                 work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
@@ -1283,8 +1288,9 @@ class MainWindow(QMainWindow):
     def _normalize_work_mode_ui_text(self, ui_text: str) -> str:
         """将工作模式下拉框显示文本标准化为核心关键字。"""
         text = str(ui_text).strip() if ui_text is not None else ""
-        if text and text[0] in "一二三四":
+        if text and text[0] in "一二三四五":
             text = text[1:].strip()
+        text = text.replace(" ", "")
         return text
     
     def on_question_enabled_changed(self, state):
