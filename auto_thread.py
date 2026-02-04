@@ -1341,7 +1341,7 @@ class GradingThread(QThread):
 
         return None, None, None, None, "", f"评分失败（已尝试两个API）: {last_error}"
 
-    def _is_unrecognizable_answer(self, student_answer_summary, itemized_scores):
+    def _is_unrecognizable_answer(self, student_answer_summary, itemized_scores, scoring_basis=None):
         """
         检查学生答案是否无法识别。
         当AI判断图片无法识别时，会返回特定的摘要内容和全零分。
@@ -1356,25 +1356,32 @@ class GradingThread(QThread):
         if not student_answer_summary:
             return False
 
-        # 检查摘要是否包含“图片质量/识别能力不足”的关键词。
-        # 注意：不要把“未作答/空白作答”当成无法识别（空白应当允许直接判0分）。
-        unrecognizable_keywords = [
-            "无法识别", "字迹模糊", "无法辨认",
-            "图片内容完全无法识别", "字迹完全无法辨认",
-            "图片不清晰", "看不清", "看不清楚",
+        # 仅在“完全无法识别 + 无有效答案/内容”这类高置信场景触发。
+        # 注意：避免把“部分看不清/部分无法识别”当成整题无法识别。
+        strong_keywords = [
+            "完全无法识别", "字迹完全无法辨认", "图片内容完全无法识别",
+            "完全看不清", "全部无法识别"
         ]
 
         summary_lower = student_answer_summary.lower()
-        for keyword in unrecognizable_keywords:
-            if keyword in summary_lower:
-                return True
+        if "部分" in summary_lower or "局部" in summary_lower:
+            return False
 
-        # 检查是否全零分且摘要表明无法识别
+        has_strong = any(k in summary_lower for k in strong_keywords)
+        if not has_strong:
+            return False
+
+        basis_lower = (scoring_basis or "").lower()
+        has_no_effective = any(k in summary_lower or k in basis_lower for k in [
+            "无有效", "无有效内容", "无可评分", "未检测到可评分"
+        ])
+
+        all_zero = False
         if itemized_scores and isinstance(itemized_scores, list):
-            # 检查是否全为0
             all_zero = all(score == 0 for score in itemized_scores)
-            if all_zero and any(keyword in summary_lower for keyword in unrecognizable_keywords):
-                return True
+
+        if has_no_effective or all_zero:
+            return True
 
         return False
 
@@ -1397,7 +1404,12 @@ class GradingThread(QThread):
         if not student_answer_summary and not scoring_basis:
             return None
 
-        combined = " ".join([str(student_answer_summary or ""), str(scoring_basis or "")]).strip()
+        # 优先使用摘要判断；摘要非空时不使用 scoring_basis，以避免“部分未作答”误判整题空白
+        if student_answer_summary and str(student_answer_summary).strip():
+            combined = str(student_answer_summary).strip()
+        else:
+            combined = str(scoring_basis or "").strip()
+
         s = combined.lower()
 
         # 明确的“图片为空/图像为空”等属于配置或截图问题，仍应走异常卷/人工，不当作空白作答
@@ -1428,7 +1440,12 @@ class GradingThread(QThread):
         if not student_answer_summary and not scoring_basis:
             return None
 
-        combined = " ".join([str(student_answer_summary or ""), str(scoring_basis or "")]).strip()
+        # 优先使用摘要判断；摘要非空时不使用 scoring_basis，避免“部分字迹问题”误判整题乱码
+        if student_answer_summary and str(student_answer_summary).strip():
+            combined = str(student_answer_summary).strip()
+        else:
+            combined = str(scoring_basis or "").strip()
+
         s = combined.lower()
 
         patterns = [
@@ -1491,8 +1508,13 @@ class GradingThread(QThread):
         if not student_answer_summary and not scoring_basis:
             return False
 
-        summary_lower = (student_answer_summary or "").lower()
-        basis_lower = (scoring_basis or "").lower()
+        # 优先使用摘要判断；摘要非空时不使用 scoring_basis，避免局部“看不清”导致整题停止
+        if student_answer_summary and str(student_answer_summary).strip():
+            summary_lower = str(student_answer_summary).strip().lower()
+            basis_lower = ""
+        else:
+            summary_lower = ""
+            basis_lower = (scoring_basis or "").lower()
 
         # 检查是否包含请求图片内容的关键词
         request_keywords = [
@@ -3070,71 +3092,65 @@ class GradingThread(QThread):
                 # 返回带有标记的结构，便于上层立即停止且不重试
                 return False, {'manual_intervention': True, 'message': ai_reason, 'raw_feedback': student_answer_summary, 'already_logged': True}
 
-            # 【空白/无有效作答】默认应当直接判0分（不当作异常卷）
+            # 【空白/无有效作答】仅在高置信场景强制处理：分项得分为空或全零时才覆盖
             blank_msg = self._detect_blank_answer_feedback(student_answer_summary, scoring_basis)
             if blank_msg:
-                blank_policy = self._get_grading_policy('blank_answer_policy', 'zero')
-                if blank_policy == 'zero':
-                    # 强制全0，避免模型误给分
-                    if isinstance(itemized_scores_from_json, list) and itemized_scores_from_json:
-                        itemized_scores_from_json = [0 for _ in itemized_scores_from_json]
-                    student_answer_summary = student_answer_summary if student_answer_summary else '空白作答'
-                    scoring_basis = self._build_zero_scoring_basis(blank_msg)
-                elif blank_policy == 'manual':
-                    # 使用统一停止入口
-                    display_text = student_answer_summary if student_answer_summary else ""
-                    self._stop_grading(
-                        reason=StopReason.MANUAL_INTERVENTION,
-                        message=f"空白/无有效作答({blank_msg})需要人工处理",
-                        detail=display_text,
-                        emit_signal=True,
-                        log_level="WARNING"
-                    )
-                    return False, {'manual_intervention': True, 'message': f'空白/无有效作答: {blank_msg}', 'raw_feedback': display_text}
-                else:  # anomaly
-                    # 异常试卷仅允许通过OCR识别到固定标记触发，此处不允许AI判定异常
-                    display_text = student_answer_summary if student_answer_summary else ""
+                scores_list = itemized_scores_from_json if isinstance(itemized_scores_from_json, list) else None
+                has_any_score = bool(scores_list)
+                all_zero = all(score == 0 for score in scores_list) if scores_list else True
+
+                if has_any_score and not all_zero:
+                    # 低置信：AI给了部分分，不强制判零/停阅，仅提示
                     self.log_signal.emit(
-                        f"空白/无有效作答检测到异常卷策略，但已按人工介入处理（异常卷仅限固定标记触发）：{blank_msg}",
+                        f"检测到空白作答提示但AI给分，已降级为提示：{blank_msg}",
                         True, "WARNING"
                     )
-                    self._stop_grading(
-                        reason=StopReason.MANUAL_INTERVENTION,
-                        message=f"空白/无有效作答({blank_msg})需要人工处理",
-                        detail=display_text,
-                        emit_signal=True,
-                        log_level="WARNING"
-                    )
-                    return False, {'manual_intervention': True, 'message': f'空白/无有效作答: {blank_msg}', 'raw_feedback': display_text}
+                else:
+                    blank_policy = self._get_grading_policy('blank_answer_policy', 'zero')
+                    if blank_policy == 'zero':
+                        # 强制全0，避免模型误给分
+                        if isinstance(itemized_scores_from_json, list) and itemized_scores_from_json:
+                            itemized_scores_from_json = [0 for _ in itemized_scores_from_json]
+                        student_answer_summary = student_answer_summary if student_answer_summary else '空白作答'
+                        scoring_basis = self._build_zero_scoring_basis(blank_msg)
+                    elif blank_policy == 'manual':
+                        # 使用统一停止入口
+                        display_text = student_answer_summary if student_answer_summary else ""
+                        self._stop_grading(
+                            reason=StopReason.MANUAL_INTERVENTION,
+                            message=f"空白/无有效作答({blank_msg})需要人工处理",
+                            detail=display_text,
+                            emit_signal=True,
+                            log_level="WARNING"
+                        )
+                        return False, {'manual_intervention': True, 'message': f'空白/无有效作答: {blank_msg}', 'raw_feedback': display_text}
+                    else:  # anomaly
+                        # 异常试卷仅允许通过OCR识别到固定标记触发，此处不允许AI判定异常
+                        display_text = student_answer_summary if student_answer_summary else ""
+                        self.log_signal.emit(
+                            f"空白/无有效作答检测到异常卷策略，但已按人工介入处理（异常卷仅限固定标记触发）：{blank_msg}",
+                            True, "WARNING"
+                        )
+                        self._stop_grading(
+                            reason=StopReason.MANUAL_INTERVENTION,
+                            message=f"空白/无有效作答({blank_msg})需要人工处理",
+                            detail=display_text,
+                            emit_signal=True,
+                            log_level="WARNING"
+                        )
+                        return False, {'manual_intervention': True, 'message': f'空白/无有效作答: {blank_msg}', 'raw_feedback': display_text}
 
             # 【乱码/涂画/无法识别有效文字】按策略处理（默认人工）
             gibberish_msg = self._detect_gibberish_or_doodle_feedback(student_answer_summary, scoring_basis)
             if gibberish_msg:
-                gibberish_policy = self._get_grading_policy('gibberish_answer_policy', 'manual')
-                if gibberish_policy == 'zero':
-                    if isinstance(itemized_scores_from_json, list) and itemized_scores_from_json:
-                        itemized_scores_from_json = [0 for _ in itemized_scores_from_json]
-                    student_answer_summary = student_answer_summary if student_answer_summary else '疑似涂画/乱码作答'
-                    scoring_basis = self._build_zero_scoring_basis(gibberish_msg)
-                elif gibberish_policy == 'anomaly':
-                    # 异常试卷仅允许通过OCR识别到固定标记触发，此处不允许AI判定异常
-                    display_text = student_answer_summary if student_answer_summary else ""
-                    self.log_signal.emit(
-                        f"疑似涂画/乱码检测到异常卷策略，但已按人工介入处理（异常卷仅限固定标记触发）：{gibberish_msg}",
-                        True, "WARNING"
-                    )
-                    self._stop_grading(
-                        reason=StopReason.MANUAL_INTERVENTION,
-                        message=f"疑似涂画/乱码({gibberish_msg})需要人工处理",
-                        detail=display_text,
-                        emit_signal=True,
-                        log_level="WARNING"
-                    )
-                    return False, {'manual_intervention': True, 'message': f'疑似涂画/乱码: {gibberish_msg}', 'raw_feedback': display_text}
-                # manual: 维持默认流程（后续可能由无法识别/请求图片等逻辑中止）
+                # 低置信场景降级为提示，不强制判零/停阅
+                self.log_signal.emit(
+                    f"疑似涂画/乱码提示（不强制处理）：{gibberish_msg}",
+                    True, "WARNING"
+                )
 
             # 检查是否为无法识别的情况，如果是则停止阅卷（在人工介入检查之后）
-            if self._is_unrecognizable_answer(student_answer_summary, itemized_scores_from_json):
+            if self._is_unrecognizable_answer(student_answer_summary, itemized_scores_from_json, scoring_basis):
                 error_msg = f"学生答案图片无法识别，停止阅卷。请检查图片质量或手动处理。AI反馈: {student_answer_summary}"
                 self.log_signal.emit(error_msg, True, "ERROR")
                 self._stop_grading(
@@ -3153,21 +3169,9 @@ class GradingThread(QThread):
 
             # 检查AI是否在请求提供学生答案图片内容，如果是则停止阅卷并等待用户介入
             if self._is_ai_requesting_image_content(student_answer_summary, scoring_basis):
-                error_msg = f"AI无法从图片中提取有效信息，停止阅卷并等待用户手动介入。AI反馈摘要: {student_answer_summary}"
-                self.log_signal.emit(error_msg, True, "ERROR")
-                self._stop_grading(
-                    reason=StopReason.MANUAL_INTERVENTION,
-                    message="AI无法从图片中提取有效信息，需要人工处理",
-                    detail=student_answer_summary if student_answer_summary else "",
-                    emit_signal=True,
-                    log_level="ERROR"
-                )
-                return False, {
-                    'manual_intervention': True,
-                    'message': "AI无法从图片中提取有效信息，需要人工处理",
-                    'raw_feedback': student_answer_summary,
-                    'already_logged': True
-                }
+                # 低置信场景降级为提示，不强制停阅
+                warn_msg = f"AI提示图片不清/需提供图片（仅提示，不强制停阅）。AI反馈摘要: {student_answer_summary}"
+                self.log_signal.emit(warn_msg, True, "WARNING")
 
             calculated_total_score = 0.0
             numeric_scores_list_for_return = []
