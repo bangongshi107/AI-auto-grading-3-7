@@ -53,10 +53,8 @@ class ConfigManager:
         self.dual_evaluation_enabled = False
         self.score_diff_threshold = 5
         
-        # 无人模式配置
+        # 无人模式配置（简化版：仅保留开关，移除重试延迟和轮数配置）
         self.unattended_mode_enabled = False  # 无人模式开关
-        self.unattended_retry_delay = 120  # 重试延迟（秒）
-        self.unattended_max_retry_rounds = 10  # 最大重试轮数
         
         self.subject = ""
         self.cycle_number = 1
@@ -139,10 +137,8 @@ class ConfigManager:
         self.dual_evaluation_enabled = self._get_config_safe('DualEvaluation', 'enabled', False, bool)
         self.score_diff_threshold = self._get_config_safe('DualEvaluation', 'score_diff_threshold', 5, int)
         
-        # 加载无人模式配置
+        # 加载无人模式配置（简化版）
         self.unattended_mode_enabled = self._get_config_safe('UnattendedMode', 'enabled', False, bool)
-        self.unattended_retry_delay = self._get_config_safe('UnattendedMode', 'retry_delay', 120, int)
-        self.unattended_max_retry_rounds = self._get_config_safe('UnattendedMode', 'max_retry_rounds', 10, int)
         
         self.subject = self._get_config_safe('UI', 'subject', "")
         self.cycle_number = self._get_config_safe('Auto', 'cycle_number', 1, int)
@@ -308,8 +304,6 @@ class ConfigManager:
         elif field_name == 'dual_evaluation_enabled': self.dual_evaluation_enabled = bool(value)
         elif field_name == 'score_diff_threshold': self.score_diff_threshold = max(1, int(value)) if value else 5
         elif field_name == 'unattended_mode_enabled': self.unattended_mode_enabled = bool(value)
-        elif field_name == 'unattended_retry_delay': self.unattended_retry_delay = max(10, int(value)) if value else 120
-        elif field_name == 'unattended_max_retry_rounds': self.unattended_max_retry_rounds = max(1, int(value)) if value else 10
         elif field_name == 'score_rounding_step':
             try:
                 self.score_rounding_step = float(value) if value is not None else 0.5
@@ -380,9 +374,7 @@ class ConfigManager:
             }
             config['DualEvaluation'] = {'enabled': str(self.dual_evaluation_enabled), 'score_diff_threshold': str(self.score_diff_threshold)}
             config['UnattendedMode'] = {
-                'enabled': str(self.unattended_mode_enabled),
-                'retry_delay': str(self.unattended_retry_delay),
-                'max_retry_rounds': str(self.unattended_max_retry_rounds)
+                'enabled': str(self.unattended_mode_enabled)
             }
             config['Settings'] = {
                 'score_rounding_step': str(self.score_rounding_step),

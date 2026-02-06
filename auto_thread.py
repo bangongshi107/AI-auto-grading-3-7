@@ -1,10 +1,12 @@
 import time
+from decimal import Decimal, ROUND_HALF_UP
 import base64
 import traceback
 import pyautogui
 import datetime
+import math
 from io import BytesIO
-from PIL import ImageGrab
+from PIL import ImageGrab, Image
 from PyQt5.QtCore import QThread, pyqtSignal
 import json
 import re
@@ -457,7 +459,16 @@ class ScoreProcessor:
         """
         if step <= 0:
             return value
-        return round(value / step) * step
+        try:
+            value_dec = Decimal(str(value))
+            step_dec = Decimal(str(step))
+            if step_dec == 0:
+                return value
+            scaled = value_dec / step_dec
+            rounded = scaled.quantize(Decimal('0'), rounding=ROUND_HALF_UP)
+            return float(rounded * step_dec)
+        except Exception:
+            return round(value / step) * step
     
     @staticmethod
     def validate_range(score: float, min_score: float, max_score: float, 
@@ -858,12 +869,11 @@ class GradingThread(QThread):
         self._temp_resources = []   # 追踪临时资源（图片对象等）以便清理
         
         # =================================================================
-        # 无人模式配置
+        # 无人模式配置（简化版）
         # =================================================================
         self.unattended_mode_enabled = False  # 无人模式开关
-        self.unattended_retry_delay = 120  # 重试延迟（秒）
-        self.unattended_max_retry_rounds = 10  # 最大重试轮数
-        self._unattended_retry_count = 0  # 当前重试计数
+        self._unattended_auto_score_count = 0  # 本批次无人模式自动给分计数
+        self._current_answer_area_data = None  # 当前答题区域数据（用于无人模式重新截图）
 
     def _get_common_system_message(self, include_evidence_bar: bool = True, source_desc: str = "图片内容") -> str:
         """
@@ -971,7 +981,7 @@ class GradingThread(QThread):
         return {"system": system_message, "user": user_prompt}
 
 
-    def _build_holistic_evaluation_prompt(self, standard_answer_rubric: str):
+    def _build_holistic_evaluation_prompt(self, standard_answer_rubric: str, include_word_count: bool = False):
         system_message = self._get_common_system_message(include_evidence_bar=False)
         user_prompt = (
             "【题目类型：整体评估开放题】\n"
@@ -979,9 +989,22 @@ class GradingThread(QThread):
             "【评分细则】\n"
             f"{standard_answer_rubric.strip()}\n"
         )
+        if include_word_count:
+            user_prompt = (
+                "【题目类型：整体评估开放题】\n"
+                "- 仅依据评分细则和学生答案给出总分；在 scoring_basis 说明评分理由。\n\n"
+                "【字数要求（必须执行）】\n"
+                "- 必须输出 word_count 与 word_count_confidence（high/medium/low）。\n"
+                "- 若无法可靠估计字数：word_count 填 null，word_count_confidence 置为 low。\n\n"
+                "【输出格式】\n"
+                "只输出JSON对象（不要代码块/解释），必须包含以下键：\n"
+                "student_answer_summary, scoring_basis, itemized_scores, word_count, word_count_confidence\n\n"
+                "【评分细则】\n"
+                f"{standard_answer_rubric.strip()}\n"
+            )
         return {"system": system_message, "user": user_prompt}
 
-    def select_and_build_prompt(self, standard_answer, question_type):
+    def select_and_build_prompt(self, standard_answer, question_type, work_mode: Optional[str] = None):
         """根据题目类型选择并构建相应的Prompt。
 
         返回结构：
@@ -1017,7 +1040,9 @@ class GradingThread(QThread):
         elif question_type == "Formula_Proof_StepBased":
             return self._build_formula_proof_prompt(standard_answer)
         elif question_type == "Holistic_Evaluation_Open":
-            return self._build_holistic_evaluation_prompt(standard_answer)
+            direct_modes = {"direct_grade", "direct_grade_thinking"}
+            include_word_count = work_mode in direct_modes if work_mode else False
+            return self._build_holistic_evaluation_prompt(standard_answer, include_word_count=include_word_count)
         else:
             return self._build_subjective_pointbased_prompt(standard_answer)
 
@@ -1053,7 +1078,7 @@ class GradingThread(QThread):
         new_prompt["thinking"] = {"type": thinking_type}
         return new_prompt
 
-    def select_and_build_text_prompt(self, standard_answer: str, question_type: str, student_answer_text: str):
+    def select_and_build_text_prompt(self, standard_answer: str, question_type: str, student_answer_text: str, work_mode: Optional[str] = None):
         """为识评分离模式构建纯文本评分Prompt。"""
         system_message = self._get_common_system_message(source_desc="学生答案文本")
         student_text = student_answer_text if student_answer_text is not None else ""
@@ -1085,11 +1110,26 @@ class GradingThread(QThread):
             )
         elif question_type == "Holistic_Evaluation_Open":
             system_message = self._get_common_system_message(include_evidence_bar=False, source_desc="学生答案文本")
-            user_prompt = (
-                "【题目类型：整体评估开放题】\n"
-                "- 仅依据评分细则和学生答案给出总分；在 scoring_basis 说明评分理由。\n\n"
-                + base_user_prompt
-            )
+            direct_modes = {"direct_grade", "direct_grade_thinking"}
+            include_word_count = work_mode in direct_modes if work_mode else False
+            if include_word_count:
+                user_prompt = (
+                    "【题目类型：整体评估开放题】\n"
+                    "- 仅依据评分细则和学生答案给出总分；在 scoring_basis 说明评分理由。\n\n"
+                    "【字数要求（必须执行）】\n"
+                    "- 必须输出 word_count 与 word_count_confidence（high/medium/low）。\n"
+                    "- 若无法可靠估计字数：word_count 填 null，word_count_confidence 置为 low。\n\n"
+                    "【输出格式】\n"
+                    "只输出JSON对象（不要代码块/解释），必须包含以下键：\n"
+                    "student_answer_summary, scoring_basis, itemized_scores, word_count, word_count_confidence\n\n"
+                    + base_user_prompt
+                )
+            else:
+                user_prompt = (
+                    "【题目类型：整体评估开放题】\n"
+                    "- 仅依据评分细则和学生答案给出总分；在 scoring_basis 说明评分理由。\n\n"
+                    + base_user_prompt
+                )
         else:
             user_prompt = (
                 "【题目类型：按点给分主观题】\n"
@@ -1240,9 +1280,6 @@ class GradingThread(QThread):
 
             self.current_api = other_api
 
-        if self._schedule_unattended_retry_if_needed(str(last_error or "")):
-            return None, None, None, None, "", ""
-
         self._stop_grading(
             reason=StopReason.API_ERROR,
             message="两个AI接口均失败，请检查网络或密钥配置",
@@ -1324,9 +1361,6 @@ class GradingThread(QThread):
                 break
 
             self.current_api = other_api
-
-        if self._schedule_unattended_retry_if_needed(str(last_error or "")):
-            return None, None, None, None, "", ""
 
         self._stop_grading(
             reason=StopReason.API_ERROR,
@@ -1597,6 +1631,71 @@ class GradingThread(QThread):
         except Exception:
             pass
 
+    def _calculate_image_fill_rate(self, img_str: str) -> float:
+        """计算图像的填充率（非白色像素占比）。
+        
+        Args:
+            img_str: base64编码的图片字符串（带data URI前缀）
+            
+        Returns:
+            float: 填充率（0.0~1.0），出错时返回0.5（保守值）
+        """
+        try:
+            # 移除data URI前缀
+            if ',' in img_str:
+                base64_data = img_str.split(',', 1)[1]
+            else:
+                base64_data = img_str
+            
+            # 解码base64
+            image_bytes = base64.b64decode(base64_data)
+            image = Image.open(BytesIO(image_bytes))
+            
+            # 转为灰度图
+            gray = image.convert('L')
+            pixel_data = gray.getdata()
+            if pixel_data is None:
+                return 0.5  # 无法获取像素数据，返回保守值
+            pixels = list(pixel_data)  # type: ignore[arg-type]
+            
+            # 统计"有墨迹"的像素（像素值 < 200 视为有内容）
+            ink_pixels = sum(1 for p in pixels if p < 200)
+            fill_rate = ink_pixels / len(pixels) if pixels else 0.0
+            
+            image.close()
+            return fill_rate
+            
+        except Exception as e:
+            self.log_signal.emit(f"[无人模式] 计算图像填充率失败: {e}", False, "WARNING")
+            return 0.5  # 保守值，会给步长最小分
+
+    def _is_must_stop_error(self, error_msg: str) -> bool:
+        """判断是否为必须立即停止的错误（无人模式不能处理）。
+        
+        这些错误通常是配置/环境问题，自动给分可能导致打错卷子。
+        """
+        if not error_msg:
+            return False
+        
+        error_lower = str(error_msg).lower()
+        
+        must_stop_keywords = [
+            'fail-safe triggered',  # PyAutoGUI安全机制
+            'failsafe',
+            '分数输入失败',
+            '输入失败',
+            '截图失败',
+            '截取答案区域失败',
+            '确认按钮点击失败',
+            '点击失败',
+            '窗口找不到',
+            '区域无效',
+            'permission denied',
+            'access is denied',
+        ]
+        
+        return any(k in error_lower for k in must_stop_keywords)
+
     def _is_unattended_retryable_error_message(self, error_msg: str) -> bool:
         """无人模式可重试判定：仅覆盖 5xx / 429 / 连接中断 / 超时等短暂性错误。"""
         if not error_msg:
@@ -1615,48 +1714,157 @@ class GradingThread(QThread):
             'server_error',
         }
 
-    def _schedule_unattended_retry_if_needed(self, error_msg: str) -> bool:
-        """若满足无人模式重试条件则进入重试状态并等待，返回是否已安排重试。"""
+    def _handle_unattended_auto_score(self, q_config: dict, img_str: str, error_reason: str) -> Optional[Tuple[float, str]]:
+        """无人模式自动给分处理。
+        
+        处理流程：
+        1. 等待1秒让页面/网络恢复
+        2. 重新截图
+        3. 再尝试一轮完整API故障转移（2个API各1次）
+        4. 若仍失败，根据图像填充率自动给分
+        
+        Args:
+            q_config: 题目配置
+            img_str: 原始截图（base64）
+            error_reason: 导致需要人工介入的原因
+            
+        Returns:
+            (自动分数, 备注说明) 或 None（无法自动处理）
+        """
         if not self.unattended_mode_enabled:
-            return False
-
-        if not self._is_unattended_retryable_error_message(error_msg):
-            return False
-
-        if self._unattended_retry_count >= self.unattended_max_retry_rounds:
-            try:
-                self.log_signal.emit(
-                    f"[无人模式] 已达到最大重试次数 ({self.unattended_max_retry_rounds})，停止重试",
-                    True, "ERROR"
-                )
-            except Exception:
-                pass
-            return False
-
-        self._unattended_retry_count += 1
-
-        try:
+            return None
+        
+        # 必须停止的错误不能自动处理
+        if self._is_must_stop_error(error_reason):
             self.log_signal.emit(
-                f"[无人模式] 检测到可重试错误，准备第 {self._unattended_retry_count}/{self.unattended_max_retry_rounds} 次重试",
-                False, "WARNING"
+                f"[无人模式] 检测到必须停止的错误，无法自动处理: {error_reason[:50]}",
+                True, "ERROR"
             )
-        except Exception:
-            pass
-
-        with self._state_lock:
-            self.running = False
-            self.completion_status = "retrying"
-            self.interrupt_reason = str(error_msg)
+            return None
+        
+        # 连续自动给分过多，停止检查
+        if self._unattended_auto_score_count >= 3:
+            self.log_signal.emit(
+                "[无人模式] 连续自动给分已达3份，暂停以便人工检查是否有系统性问题",
+                True, "WARNING"
+            )
+            return None
+        
+        self.log_signal.emit("[无人模式] 尝试自动处理...", False, "INFO")
+        
+        # 步骤1: 等待1秒让页面/网络恢复
+        time.sleep(1.0)
+        
+        # 步骤2: 重新截图
+        new_img_str = None
+        if self._current_answer_area_data:
             try:
+                self.log_signal.emit("[无人模式] 重新截取答题区域...", False, "DETAIL")
+                new_img_str = self._capture_question_area(self._current_answer_area_data)
+            except Exception as e:
+                self.log_signal.emit(f"[无人模式] 重新截图失败: {e}", False, "WARNING")
+        
+        # 使用新截图或原截图
+        final_img_str = new_img_str if new_img_str else img_str
+        
+        # 步骤3: 再尝试一轮完整API故障转移（渐进式等待，最大化成功率）
+        # 无人模式追求成功率，不追求速度，使用较长等待间隔让服务端恢复
+        self.log_signal.emit("[无人模式] 开始渐进式API重试（等待时间较长以提高成功率）...", False, "INFO")
+        
+        api_configs = {
+            "first": (self.api_service.call_first_api, "API 1", "second"),
+            "second": (self.api_service.call_second_api, "API 2", "first")
+        }
+        
+        # 渐进式等待时间（秒）：第1次30秒，第2次60秒
+        retry_delays = [30, 60]
+        
+        # 构建评分prompt（从q_config提取必要参数）
+        prompt = None
+        try:
+            standard_answer = q_config.get('standard_answer', '')
+            question_type = q_config.get('question_type', 'Subjective_PointBased_QA')
+            work_mode = q_config.get('work_mode', 'direct_grade')
+            prompt = self.select_and_build_prompt(standard_answer, question_type, work_mode)
+        except Exception as e:
+            self.log_signal.emit(f"[无人模式] 构建prompt失败: {e}", False, "WARNING")
+        
+        if prompt and final_img_str:
+            attempted_apis = []
+            for attempt in range(2):  # 最多尝试2个API
+                current_api_key = self.current_api
+                api_func, api_name, other_api = api_configs[current_api_key]
+                
+                if current_api_key in attempted_apis:
+                    break
+                attempted_apis.append(current_api_key)
+                
+                # 渐进式等待：让限流冷却、服务端恢复
+                wait_time = retry_delays[attempt] if attempt < len(retry_delays) else 60
                 self.log_signal.emit(
-                    f"[无人模式] 等待 {self.unattended_retry_delay} 秒后重试...",
+                    f"[无人模式] 等待{wait_time}秒后使用{api_name}重试...",
                     False, "INFO"
                 )
-            except Exception:
-                pass
-
-        time.sleep(self.unattended_retry_delay)
-        return True
+                time.sleep(wait_time)
+                
+                # 检查线程是否仍在运行
+                if not self.running:
+                    self.log_signal.emit("[无人模式] 线程已停止，取消重试", False, "INFO")
+                    return None
+                
+                self.log_signal.emit(f"[无人模式] 使用{api_name}重试...", False, "INFO")
+                
+                try:
+                    score, reasoning, scores, confidence, response_text, error = self._call_and_process_single_api(
+                        api_func, final_img_str, prompt, q_config,
+                        api_name=f"[无人模式]{api_name}", api_key=current_api_key
+                    )
+                    
+                    if not error and score is not None:
+                        self.log_signal.emit(
+                            f"[无人模式] {api_name}重试成功，得分: {score}",
+                            False, "INFO"
+                        )
+                        # 重试成功，重置连续计数
+                        self._unattended_auto_score_count = 0
+                        # 返回None表示正常评分成功，让调用方使用正常流程
+                        # 但这里我们需要直接返回结果
+                        return None  # 特殊返回：None表示API重试成功，不需要自动给分
+                    
+                    # 检查是否为人工介入信号（避免递归）
+                    if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入"]):
+                        self.log_signal.emit(f"[无人模式] {api_name}仍需人工介入", False, "WARNING")
+                    else:
+                        self.log_signal.emit(f"[无人模式] {api_name}重试失败: {error}", False, "WARNING")
+                    
+                except Exception as e:
+                    self.log_signal.emit(f"[无人模式] {api_name}重试异常: {e}", False, "WARNING")
+                
+                # 切换到备用API
+                self.current_api = other_api
+        
+        # 步骤4: 所有API重试都失败，根据图像填充率自动给分
+        self.log_signal.emit("[无人模式] API重试均失败，根据图像填充率自动给分...", False, "WARNING")
+        
+        fill_rate = self._calculate_image_fill_rate(final_img_str)
+        score_step = float(q_config.get('score_rounding_step', 1.0))
+        min_score = float(q_config.get('min_score', 0))
+        
+        # 填充率 < 25% → 0分；≥ 25% → 步长最小分
+        if fill_rate < 0.25:
+            auto_score = min_score  # 通常是0分
+            reason = f"无人模式自动评分：图像填充率{fill_rate:.1%}<25%，判定为接近空白"
+        else:
+            auto_score = min_score + score_step  # 步长最小分
+            reason = f"无人模式自动评分：图像填充率{fill_rate:.1%}≥25%，给步长最小分"
+        
+        self._unattended_auto_score_count += 1
+        self.log_signal.emit(
+            f"[无人模式] {reason}，自动给分: {auto_score}分 (本批次第{self._unattended_auto_score_count}次自动给分)",
+            True, "WARNING"
+        )
+        
+        return (auto_score, reason)
 
     def _set_error_state(self, reason, error: Optional[GradingError] = None):
         """统一设置错误状态（线程安全）
@@ -1691,10 +1899,6 @@ class GradingThread(QThread):
         
         # 简化：直接使用原始错误消息，不添加额外前缀
         log_msg = str(reason)
-
-        # 无人模式：扩大可重试范围（5xx/429/连接中断/超时）
-        if self._schedule_unattended_retry_if_needed(log_msg):
-            return
         
         with self._state_lock:
             self.completion_status = "error"
@@ -1931,7 +2135,7 @@ class GradingThread(QThread):
             else:
                 ocr_text = extracted_text if extracted_text is not None else ""
 
-                text_prompt_for_api = self.select_and_build_text_prompt(standard_answer, question_type, ocr_text)
+                text_prompt_for_api = self.select_and_build_text_prompt(standard_answer, question_type, ocr_text, work_mode)
                 if text_prompt_for_api is None:
                     return self.running
 
@@ -1962,7 +2166,7 @@ class GradingThread(QThread):
 
                 eval_result = (score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response)
         else:
-            text_prompt_for_api = self.select_and_build_prompt(standard_answer, question_type)
+            text_prompt_for_api = self.select_and_build_prompt(standard_answer, question_type, work_mode)
             if text_prompt_for_api is None:
                 return self.running  # 如果running为False则停止，否则继续下一题
 
@@ -2386,9 +2590,11 @@ class GradingThread(QThread):
             start_time = time.time()
 
             # 主循环：执行多轮阅卷
-            # API重置计数器：每40份卷子重置一次API实例
+            # API重置计数器：从配置读取重置间隔（默认30份卷子）
             papers_processed = 0
-            API_RESET_INTERVAL = 40
+            API_RESET_INTERVAL = getattr(self.config_manager, 'api_reset_interval', 30) if self.config_manager else 30
+            # 确保间隔值有效（至少5份，避免频繁重置）
+            API_RESET_INTERVAL = max(5, int(API_RESET_INTERVAL)) if API_RESET_INTERVAL else 30
             
             for i in range(cycle_number):
                 if not self.running:
@@ -2798,6 +3004,8 @@ class GradingThread(QThread):
                     False, "INFO"
                 )
                 self.last_used_api = self.current_api
+                # 正常评分成功，重置连续自动给分计数
+                self._unattended_auto_score_count = 0
                 return score, reasoning, scores, confidence, response_text
             
             # 检查是否为异常试卷，这种情况不需要重试其他API
@@ -2805,8 +3013,20 @@ class GradingThread(QThread):
                 # 直接返回异常试卷标记，由上层处理
                 return None, None, None, None, response_text, error
             
-            # 【关键修复】检查是否为人工介入信号，如果是则不切换API，直接返回（不再重复记录日志）
+            # 【关键修复】检查是否为人工介入信号
             if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入", "需要人工介入"]):
+                # 无人模式：尝试自动给分
+                if self.unattended_mode_enabled:
+                    auto_result = self._handle_unattended_auto_score(
+                        current_question_config, img_str, error
+                    )
+                    if auto_result is not None:
+                        auto_score, auto_reason = auto_result
+                        # 返回自动给的分数，reasoning中包含无人模式标记
+                        return auto_score, (auto_reason, auto_reason), [auto_score], {}, response_text
+                    # 如果自动给分返回None，说明需要真正停止（如必须停止的错误）
+                
+                # 非无人模式或自动给分失败：直接返回人工介入错误
                 return None, error, None, None, response_text
             
             # 失败：记录错误
@@ -2824,10 +3044,6 @@ class GradingThread(QThread):
             self.current_api = other_api
         
         # 两个API都失败了，使用统一停止入口
-        # 无人模式：若为可重试错误（5xx/429/连接中断/超时），进入重试状态
-        if self._schedule_unattended_retry_if_needed(str(last_error or "")):
-            return None, None, None, None, ""
-
         self._stop_grading(
             reason=StopReason.API_ERROR,
             message="两个AI接口均失败，请检查网络或密钥配置",
@@ -3048,6 +3264,12 @@ class GradingThread(QThread):
                 raise json.JSONDecodeError("无法解析响应为JSON", response_text, 0)
 
             # 验证必需字段是否存在（decision 字段可选，缺失时默认 manual_required）
+            question_type = current_question_config.get('question_type', 'Subjective_PointBased_QA')
+            work_mode = current_question_config.get('work_mode', 'direct_grade')
+            is_holistic = question_type == "Holistic_Evaluation_Open"
+            is_direct_mode = work_mode in {"direct_grade", "direct_grade_thinking"}
+            is_holistic_direct = is_holistic and is_direct_mode
+
             required_fields = ["student_answer_summary", "scoring_basis", "itemized_scores"]
 
             missing_fields = [field for field in required_fields if field not in data]
@@ -3056,10 +3278,85 @@ class GradingThread(QThread):
                 self.log_signal.emit(error_msg, True, "ERROR")
                 return False, error_msg
 
+            if is_holistic_direct:
+                missing_word_fields = [
+                    field for field in ["word_count", "word_count_confidence"] if field not in data
+                ]
+                if missing_word_fields:
+                    message = f"整体评估开放题缺少字数字段: {', '.join(missing_word_fields)}"
+                    self._stop_grading(
+                        reason=StopReason.MANUAL_INTERVENTION,
+                        message=message,
+                        detail="请人工核对字数后评分",
+                        emit_signal=True,
+                        log_level="WARNING"
+                    )
+                    return False, {
+                        'manual_intervention': True,
+                        'message': message,
+                        'raw_feedback': data.get("student_answer_summary", ""),
+                        'already_logged': True
+                    }
+
             student_answer_summary = data.get("student_answer_summary", "")
             scoring_basis = data.get("scoring_basis", "未能提取评分依据")
             itemized_scores_from_json = data.get("itemized_scores")
             confidence_data = {}  # 置信度功能暂时停用
+
+            # 整体评估开放题：字数信息强校验
+            if is_holistic_direct:
+                word_count_raw = data.get("word_count", None)
+                word_count = None
+                if isinstance(word_count_raw, (int, float)):
+                    word_count = int(word_count_raw)
+                elif isinstance(word_count_raw, str):
+                    cleaned = word_count_raw.replace(",", "")
+                    match = re.search(r"\d+", cleaned)
+                    if match:
+                        word_count = int(match.group(0))
+
+                if word_count is not None and word_count < 0:
+                    word_count = None
+
+                word_conf_raw = data.get("word_count_confidence", "")
+                word_count_confidence = str(word_conf_raw).strip().lower()
+                if word_count_confidence not in {"high", "medium", "low"}:
+                    word_count_confidence = None
+
+                if word_count is None or not word_count_confidence:
+                    message = "字数信息缺失或格式错误，需人工处理"
+                    self._stop_grading(
+                        reason=StopReason.MANUAL_INTERVENTION,
+                        message=message,
+                        detail=f"word_count={word_count_raw}, word_count_confidence={word_conf_raw}",
+                        emit_signal=True,
+                        log_level="WARNING"
+                    )
+                    return False, {
+                        'manual_intervention': True,
+                        'message': message,
+                        'raw_feedback': student_answer_summary,
+                        'already_logged': True
+                    }
+
+                if word_count_confidence == "low":
+                    message = "字数可信度低，需人工复核"
+                    self._stop_grading(
+                        reason=StopReason.MANUAL_INTERVENTION,
+                        message=message,
+                        detail=f"word_count={word_count}",
+                        emit_signal=True,
+                        log_level="WARNING"
+                    )
+                    return False, {
+                        'manual_intervention': True,
+                        'message': message,
+                        'raw_feedback': student_answer_summary,
+                        'already_logged': True
+                    }
+
+                confidence_data["word_count"] = word_count
+                confidence_data["word_count_confidence"] = word_count_confidence
 
             # =====================================================================
             # 【方案A】基于关键词检测的决策逻辑（默认使用，已验证稳定）
@@ -3545,6 +3842,22 @@ class GradingThread(QThread):
             # self._set_error_state(f"执行单次输入出错: {str(e)}") # 避免重复设置错误
             return False
 
+    def _format_score_for_input(self, score_value: float, score_step: float) -> str:
+        """根据步长格式化分数，避免输入形如 1.0 的字符串。"""
+        try:
+            step_is_int = math.isclose(score_step, round(score_step))
+        except Exception:
+            step_is_int = False
+
+        if step_is_int:
+            return str(int(round(score_value)))
+
+        if math.isclose(score_value, round(score_value)):
+            return str(int(round(score_value)))
+
+        formatted = f"{score_value:.10f}".rstrip('0').rstrip('.')
+        return formatted if formatted else "0"
+
     def input_score(self, final_score_to_input: float, default_score_pos, confirm_button_pos, current_question_config):
         """输入分数，根据模式选择单点或三步输入，并处理分数到0.5的倍数。"""
         try:
@@ -3605,19 +3918,19 @@ class GradingThread(QThread):
                 if not self.running:
                     self.log_signal.emit("检测到已停止，跳过本次分数提交。", False, "INFO")
                     return
-                if not self._perform_single_input(s1, q_score_input_pos_step1):
+                if not self._perform_single_input(self._format_score_for_input(s1, score_step), q_score_input_pos_step1):
                     self._set_error_state("三步打分输入失败 (步骤1)")
                     return
                 if not self.running:
                     self.log_signal.emit("检测到已停止，跳过本次分数提交。", False, "INFO")
                     return
-                if not self._perform_single_input(s2, q_score_input_pos_step2):
+                if not self._perform_single_input(self._format_score_for_input(s2, score_step), q_score_input_pos_step2):
                     self._set_error_state("三步打分输入失败 (步骤2)")
                     return
                 if not self.running:
                     self.log_signal.emit("检测到已停止，跳过本次分数提交。", False, "INFO")
                     return
-                if not self._perform_single_input(s3, q_score_input_pos_step3):
+                if not self._perform_single_input(self._format_score_for_input(s3, score_step), q_score_input_pos_step3):
                     self._set_error_state("三步打分输入失败 (步骤3)")
                     return
                 input_successful = True
@@ -3627,7 +3940,7 @@ class GradingThread(QThread):
                 if not default_score_pos:
                     self._set_error_state(f"题目 {current_processing_q_index} 的分数输入位置未配置，阅卷中止。")
                     return
-                if not self._perform_single_input(final_score_processed, default_score_pos):
+                if not self._perform_single_input(self._format_score_for_input(final_score_processed, score_step), default_score_pos):
                     self._set_error_state("分数输入失败")
                     return
                 input_successful = True
@@ -3693,6 +4006,12 @@ class GradingThread(QThread):
                     else (self.first_model_id if work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'} else "")
                 ),
             }
+
+            if isinstance(confidence_data, dict):
+                if "word_count" in confidence_data:
+                    record["word_count"] = confidence_data.get("word_count")
+                if "word_count_confidence" in confidence_data:
+                    record["word_count_confidence"] = confidence_data.get("word_count_confidence")
 
             # 2. 根据模式填充特定字段
             is_dual = isinstance(reasoning_data, dict) and reasoning_data.get('is_dual')

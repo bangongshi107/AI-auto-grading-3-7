@@ -2,6 +2,8 @@
 # 支持多平台：火山引擎、阿里通义、百度千帆、腾讯混元、智谱、月之暗面、OpenRouter、OpenAI、Google Gemini
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import logging
 import traceback
 from typing import Tuple, Optional, Dict, Any
@@ -169,10 +171,38 @@ class ApiService:
             pass
 
     def _get_session(self) -> requests.Session:
-        """获取当前线程专属的 requests.Session。"""
+        """获取当前线程专属的 requests.Session。
+        
+        配置智能重试和连接池管理：
+        - 自动重试连接错误（Max retries exceeded问题）
+        - 禁用keep-alive连接复用超时导致的断连问题
+        - 在底层连接失败时自动重建连接
+        """
         sess = getattr(self._thread_local, "session", None)
         if sess is None:
             sess = requests.Session()
+            
+            # 配置智能重试策略：解决连接池复用导致的"Max retries exceeded"问题
+            retry_strategy = Retry(
+                total=3,                    # 总共重试3次
+                backoff_factor=0.5,         # 指数退避：0.5s, 1s, 2s
+                status_forcelist=[500, 502, 503, 504],  # 服务端错误时重试
+                allowed_methods=["POST"],   # 允许POST请求重试
+                raise_on_status=False,      # 不抛出状态码异常，由业务层处理
+            )
+            
+            # 创建适配器，配置连接池参数
+            adapter = HTTPAdapter(
+                max_retries=retry_strategy,
+                pool_connections=5,         # 连接池大小
+                pool_maxsize=5,             # 每个主机的最大连接数
+                pool_block=False,           # 不阻塞等待连接
+            )
+            
+            # 为HTTP和HTTPS都挂载适配器
+            sess.mount("https://", adapter)
+            sess.mount("http://", adapter)
+            
             self._thread_local.session = sess
         return sess
 
@@ -541,12 +571,18 @@ class ApiService:
                 return None, friendly_error
         except requests.exceptions.Timeout:
             self.logger.warning(f"[{provider_name}] 请求超时")
-            return None, f"[{provider_name}] 请求超时，请检查网络连接或稍后重试"
+            # 超时可能是连接池问题，重置Session确保下次使用新连接
+            self.reset()
+            return None, f"[{provider_name}] 请求超时"
         except requests.exceptions.ConnectionError as e:
             self.logger.warning(f"[{provider_name}] 连接失败: {str(e)[:100]}")
-            return None, f"[{provider_name}] 无法连接到服务器，请检查网络设置"
+            # 连接出错时重置Session，清理可能损坏的连接池
+            self.reset()
+            return None, f"[{provider_name}] 连接失败: {str(e)[:100]}"
         except requests.exceptions.RequestException as e:
             self.logger.exception(f"[{provider_name}] 网络请求异常")
+            # 其他网络异常也重置Session
+            self.reset()
             friendly_error = self._create_network_error_message(e)
             return None, friendly_error
 

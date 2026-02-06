@@ -1215,8 +1215,12 @@ class MainWindow(QMainWindow):
         is_dual_enabled = dual_eval_checkbox and dual_eval_checkbox.isChecked() if dual_eval_checkbox else False
         is_unattended_enabled = unattended_checkbox and unattended_checkbox.isChecked() if unattended_checkbox else False
         
+        # ===========================================================
+        # 双评与无人模式互斥逻辑
+        # ===========================================================
         if dual_eval_checkbox:
-            dual_allowed = is_single_q1_mode and not has_ocr_then_grade
+            # 双评允许条件：单题模式 + 非识评分离 + 无人模式未开启
+            dual_allowed = is_single_q1_mode and not has_ocr_then_grade and not is_unattended_enabled
             dual_eval_checkbox.setEnabled(dual_allowed)
             if (not dual_allowed) and dual_eval_checkbox.isChecked():
                 dual_eval_checkbox.blockSignals(True)
@@ -1224,9 +1228,22 @@ class MainWindow(QMainWindow):
                 self.handle_checkBox_save('dual_evaluation_enabled', False)
                 dual_eval_checkbox.blockSignals(False)
                 is_dual_enabled = False
+                if is_unattended_enabled:
+                    self.log_message("无人模式与双评互斥，已自动关闭双评", False, "INFO")
             
             is_dual_active = dual_eval_checkbox.isChecked() and dual_eval_checkbox.isEnabled()
             self._safe_set_enabled('score_diff_threshold', is_dual_active)
+        
+        if unattended_checkbox:
+            # 无人模式允许条件：双评未开启
+            unattended_allowed = not is_dual_enabled
+            unattended_checkbox.setEnabled(unattended_allowed)
+            if (not unattended_allowed) and unattended_checkbox.isChecked():
+                unattended_checkbox.blockSignals(True)
+                unattended_checkbox.setChecked(False)
+                self.handle_checkBox_save('unattended_mode_enabled', False)
+                unattended_checkbox.blockSignals(False)
+                self.log_message("双评与无人模式互斥，已自动关闭无人模式", False, "INFO")
         
         # 第二组API的启用逻辑：
         # 1. 双评模式启用时需要第二组API
@@ -1576,9 +1593,9 @@ class MainWindow(QMainWindow):
         
         # 提示用户无人模式的含义
         if is_enabled:
-            self.log_message("无人模式已启用：两个API都失败时将自动重试，直到成功或达到最大重试次数")
+            self.log_message("无人模式已启用：遇到无法识别的答案时，自动按保守策略给分（填充率<25%给0分，否则给步长最小分）并标记待复核")
         else:
-            self.log_message("无人模式已禁用：两个API都失败时将立即停止并等待人工介入")
+            self.log_message("无人模式已禁用：遇到问题时将立即停止并等待人工处理")
 
     def _connect_signals(self):
         """统一连接所有UI控件的信号与槽"""
