@@ -951,8 +951,6 @@ class MainWindow(QMainWindow):
                 'is_single_question_one_run': len(enabled_questions_indices) == 1,
                 # 无人模式配置
                 'unattended_mode_enabled': self.config_manager.unattended_mode_enabled,
-                'unattended_retry_delay': self.config_manager.unattended_retry_delay,
-                'unattended_max_retry_rounds': self.config_manager.unattended_max_retry_rounds,
             }
 
             self.worker.set_parameters(**params)
