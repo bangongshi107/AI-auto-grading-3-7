@@ -753,6 +753,7 @@ class MainWindow(QMainWindow):
             unattended_element = self.get_ui_element('unattended_mode_enabled', QCheckBox)
             if unattended_element and isinstance(unattended_element, QCheckBox):
                 unattended_element.setChecked(self.config_manager.unattended_mode_enabled)
+                unattended_element.setToolTip("启用后，AI评分失败时自动给保守分并标记待复核，系统不停机继续阅卷。\n• 标准模式：按填充率给分（<25%给0分，否则给步长最小分）\n• 三步打分：每步各给1分（共3分），便于快速定位回评\n禁用：遇到问题时立即停止，等待人工处理")
 
             # 加载题目配置
             for i in range(1, self.max_questions + 1):
@@ -1591,7 +1592,7 @@ class MainWindow(QMainWindow):
         
         # 提示用户无人模式的含义
         if is_enabled:
-            self.log_message("无人模式已启用：遇到无法识别的答案时，自动按保守策略给分（填充率<25%给0分，否则给步长最小分）并标记待复核")
+            self.log_message("无人模式已启用：AI失败时自动给保守分并标记待复核（三步打分模式下每步各给1分，共3分）")
         else:
             self.log_message("无人模式已禁用：遇到问题时将立即停止并等待人工处理")
 
