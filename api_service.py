@@ -202,7 +202,11 @@ class ApiService:
             # 为HTTP和HTTPS都挂载适配器
             sess.mount("https://", adapter)
             sess.mount("http://", adapter)
-            
+
+            # 禁用 HTTP keep-alive：防止服务端空闲超时关闭连接后客户端仍复用
+            # 导致 "Max retries exceeded" / 僵尸连接问题
+            sess.headers.update({"Connection": "close"})
+
             self._thread_local.session = sess
         return sess
 

@@ -672,7 +672,7 @@ class MainWindow(QMainWindow):
                 work_mode_combo.addItem("一 识图直评", "direct_grade")
                 work_mode_combo.addItem("二 直评+推理", "direct_grade_thinking")
                 work_mode_combo.addItem("三 识评分离", "ocr_then_grade")
-                work_mode_combo.addItem("四 分离+推理", "ocr_then_grade_thinking")
+                work_mode_combo.addItem("四 分离+单推理", "ocr_then_grade_thinking")
                 work_mode_combo.addItem("五 分离+双推理", "ocr_then_grade_dual_thinking")
                 work_mode_combo.setToolTip("识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI识别文字后评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理")
 
@@ -793,7 +793,7 @@ class MainWindow(QMainWindow):
                             'direct_grade': '一 识图直评',
                             'direct_grade_thinking': '二 直评+推理',
                             'ocr_then_grade': '三 识评分离',
-                            'ocr_then_grade_thinking': '四 分离+推理',
+                            'ocr_then_grade_thinking': '四 分离+单推理',
                             'ocr_then_grade_dual_thinking': '五 分离+双推理'
                         }
                         display_text = display_text_map.get(work_mode_value, '一 识图直评')

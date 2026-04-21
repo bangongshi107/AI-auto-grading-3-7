@@ -1353,14 +1353,18 @@ class GradingThread(QThread):
 
             if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入", "需要人工介入"]):
                 manual_intervention_error = error
-                self.log_signal.emit(f"{api_name}请求人工介入，尝试交叉重试...", False, "WARNING")
                 last_error = error
+                if not self.unattended_mode_enabled:
+                    # 非无人模式：立即通知用户，无需交叉重试
+                    self.log_signal.emit(f"{api_name}请求人工介入，立即通知用户处理", False, "WARNING")
+                    break
+                self.log_signal.emit(f"{api_name}请求人工介入，尝试交叉重试...", False, "WARNING")
                 continue
 
             last_error = error
             self.log_signal.emit(f"{api_name}评分失败（第{attempt_idx + 1}/4次尝试）", False, "WARNING")
 
-        # 4次交叉重试全部失败
+        # 重试循环结束（4次全部失败，或非无人模式提前退出）
         if manual_intervention_error:
             return None, None, None, None, last_response_text, manual_intervention_error
         
@@ -1770,9 +1774,14 @@ class GradingThread(QThread):
         final_img_str = new_img_str if new_img_str else img_str
         
         # 步骤3: 再尝试一轮完整API故障转移（渐进式等待，最大化成功率）
-        # 无人模式追求成功率，不追求速度，使用较长等待间隔让服务端恢复
-        self.log_signal.emit("[无人模式] 开始渐进式API重试（等待时间较长以提高成功率）...", False, "INFO")
-        
+        # 仅对网络/API类错误进行重试；内容类人工介入（如字迹潦草）重试无意义，直接跳到步骤4
+        should_retry_api = self._is_unattended_retryable_error_message(error_reason)
+        if not should_retry_api:
+            self.log_signal.emit(
+                "[无人模式] 人工介入原因为内容问题（非网络/API错误），跳过API重试，直接根据填充率评分",
+                False, "WARNING"
+            )
+
         api_configs = {
             "first": (self.api_service.call_first_api, "API 1", "second"),
             "second": (self.api_service.call_second_api, "API 2", "first")
@@ -1791,7 +1800,8 @@ class GradingThread(QThread):
         except Exception as e:
             self.log_signal.emit(f"[无人模式] 构建prompt失败: {e}", False, "WARNING")
         
-        if prompt and final_img_str:
+        if should_retry_api and prompt and final_img_str:
+            self.log_signal.emit("[无人模式] 开始渐进式API重试（等待时间较长以提高成功率）...", False, "INFO")
             attempted_apis = []
             for attempt in range(2):  # 最多尝试2个API
                 current_api_key = self.current_api
@@ -3055,11 +3065,15 @@ class GradingThread(QThread):
             if isinstance(error, dict) and error.get('anomaly_paper'):
                 return None, None, None, None, response_text, error
             
-            # 人工介入信号：记录但继续交叉重试（可能是截图时序问题）
+            # 人工介入信号：非无人模式立即退出通知用户；无人模式则交叉重试
             if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入", "需要人工介入"]):
                 manual_intervention_error = error
-                self.log_signal.emit(f"{api_name}请求人工介入，尝试交叉重试...", False, "WARNING")
                 last_error = error
+                if not self.unattended_mode_enabled:
+                    # 非无人模式：立即通知用户，无需交叉重试
+                    self.log_signal.emit(f"{api_name}请求人工介入，立即通知用户处理", False, "WARNING")
+                    break
+                self.log_signal.emit(f"{api_name}请求人工介入，尝试交叉重试...", False, "WARNING")
                 continue  # 继续交叉重试
             
             # 普通失败：记录错误，继续交叉重试
@@ -3076,6 +3090,21 @@ class GradingThread(QThread):
                 if auto_result is not None:
                     auto_score, auto_reason = auto_result
                     return auto_score, (auto_reason, auto_reason), [auto_score], {}, last_response_text
+            # 【修复】调用 _stop_grading 将 self.running 置为 False，
+            # 使 _process_single_question 中的保护判断 `if not self.running` 能正确生效，
+            # 避免触发误导性的 TYPE_SCORE_PARSE 错误（"AI返回的分数格式无效"）
+            ai_reason = manual_intervention_error
+            for prefix in ["需人工介入: ", "需人工介入：", "需要人工介入: ", "需要人工介入："]:
+                if isinstance(ai_reason, str) and ai_reason.startswith(prefix):
+                    ai_reason = ai_reason[len(prefix):].strip()
+                    break
+            self._stop_grading(
+                reason=StopReason.MANUAL_INTERVENTION,
+                message=ai_reason,
+                detail="",
+                emit_signal=True,
+                log_level="WARNING"
+            )
             return None, manual_intervention_error, None, None, last_response_text
         
         # 普通API故障

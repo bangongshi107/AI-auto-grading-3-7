@@ -4,7 +4,6 @@ import datetime
 import pathlib
 import warnings
 import ctypes
-import shutil
 from ctypes import wintypes
 from typing import Callable
 
@@ -66,6 +65,8 @@ import winsound
 import traceback
 import pandas as pd
 import time
+
+### Esc 方案已弃用（用户决定放弃） ###
 
 
 class _WindowsHotkeyEventFilter(QAbstractNativeEventFilter):
@@ -303,36 +304,8 @@ class SignalConnectionManager:
         if failed > 0:
             print(f"[信号管理] 成功断开 {disconnected} 个连接，{failed} 个连接断开失败（可能已断开）")
 
-
-
 class Application:
-    @staticmethod
-    def _clear_logs_folder() -> None:
-        """在程序启动时清理Logs文件夹"""
-        try:
-            logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Logs')
-            
-            # 如果Logs文件夹存在，清理其中的所有文件
-            if os.path.exists(logs_dir):
-                for filename in os.listdir(logs_dir):
-                    file_path = os.path.join(logs_dir, filename)
-                    try:
-                        if os.path.isfile(file_path):
-                            os.remove(file_path)
-                        elif os.path.isdir(file_path):
-                            shutil.rmtree(file_path)
-                    except Exception:
-                        pass  # 清理失败不影响程序运行
-            else:
-                # 如果文件夹不存在则创建
-                os.makedirs(logs_dir, exist_ok=True)
-        except Exception:
-            pass  # 清理失败不影响程序启动
-
     def __init__(self):
-        # 程序启动时自动清理Logs文件夹
-        self._clear_logs_folder()
-        
         # Windows 任务栏图标有时取决于 AppUserModelID（尤其是源码用 python.exe 运行时）。
         # 提前设置它可以让任务栏/Alt-Tab 更稳定地显示自定义图标。
         if sys.platform == 'win32':
@@ -976,24 +949,14 @@ class Application:
                 return str(text).replace('；', '\n')
 
             if is_dual:
-                headers.extend([
-                    "API标识", "分差阈值", "学生答案摘要", "工作模式", "OCR文本", "OCR模型", "评分模型",
-                    "AI分项得分", "AI评分依据", "AI原始总分", "双评分差", "最终得分", "评分细则(前50字)"
-                ])
+                headers.extend(["API标识", "分差阈值", "学生答案摘要", "AI分项得分", "AI评分依据", "AI原始总分", "双评分差", "最终得分", "评分细则(前50字)"])
 
                 rubric_str = record_data.get('scoring_rubric_summary', '未配置')
-
-                work_mode_display = record_data.get('work_mode_display', '识图直评')
-                ocr_text = record_data.get('ocr_text', '')
-                ocr_model_id = record_data.get('ocr_model_id', '')
+                
                 row1 = [question_index_str,
                        "API-1",
                        str(record_data.get('score_diff_threshold', "未提供")),
                        record_data.get('api1_student_answer_summary', '未提供'),
-                       work_mode_display,
-                       ocr_text,
-                       ocr_model_id,
-                       record_data.get('api1_model_id', '未指定'),
                        str(record_data.get('api1_itemized_scores', [])),
                        _format_basis_with_newlines(record_data.get('api1_scoring_basis', '未提供')),
                        str(record_data.get('api1_raw_score', 0.0)),
@@ -1004,10 +967,6 @@ class Application:
                        "API-2",
                        str(record_data.get('score_diff_threshold', "未提供")),
                        record_data.get('api2_student_answer_summary', '未提供'),
-                       work_mode_display,
-                       ocr_text,
-                       ocr_model_id,
-                       record_data.get('api2_model_id', '未指定'),
                        str(record_data.get('api2_itemized_scores', [])),
                        _format_basis_with_newlines(record_data.get('api2_scoring_basis', '未提供')),
                        str(record_data.get('api2_raw_score', 0.0)),
@@ -1016,18 +975,10 @@ class Application:
                        rubric_str]
                 rows_to_write.extend([row1, row2])
             else: # 单评模式
-                headers.extend(["学生答案摘要", "工作模式", "OCR文本", "OCR模型", "评分模型", "AI分项得分", "AI评分依据", "最终得分", "评分细则(前50字)"])
+                headers.extend(["学生答案摘要", "AI分项得分", "AI评分依据", "最终得分", "评分细则(前50字)"])
 
-                work_mode_display = record_data.get('work_mode_display', '识图直评')
-                ocr_text = record_data.get('ocr_text', '')
-                ocr_model_id = record_data.get('ocr_model_id', '')
-                grade_model_id = record_data.get('grade_model_id', record_data.get('first_model_id', '未指定'))
                 single_row = [question_index_str,
                              record_data.get('student_answer', '无法提取'),
-                             work_mode_display,
-                             ocr_text,
-                             ocr_model_id,
-                             grade_model_id,
                              str(record_data.get('sub_scores', '未提供')),
                              _format_basis_with_newlines(record_data.get('reasoning_basis', '无法提取')),
                              final_total_score_str,
@@ -1059,18 +1010,15 @@ class Application:
                 column_widths = {
                     'A': 10,  # 题目编号
                     'B': 10,  # API标识 / 学生答案摘要
-                    'C': 10,  # 分差阈值 / 工作模式
-                    'D': 80,  # 学生答案摘要 / OCR文本
-                    'E': 12,  # 工作模式 / OCR模型
-                    'F': 60,  # OCR文本 / 评分模型
-                    'G': 20,  # OCR模型 / AI分项得分
-                    'H': 20,  # 评分模型 / AI评分依据
-                    'I': 20,  # AI分项得分 / 最终得分
-                    'J': 200, # AI评分依据 / 评分细则
-                    'K': 15,  # AI原始总分
-                    'L': 12,  # 双评分差
-                    'M': 12,  # 最终得分
-                    'N': 50   # 评分细则(前50字)
+                    'C': 10,  # 分差阈值 / AI分项得分
+                    'D': 80,  # 学生答案摘要
+                    'E': 20,  # AI分项得分
+                    'F': 200, # AI评分依据（增加宽度以容纳完整的评分依据）
+                    'G': 15,  # AI原始总分/最终得分
+                    'H': 12,  # 双评分差
+                    'I': 12,  # 最终得分
+
+                    'L': 50   # 评分细则(前50字)
                 }
 
                 for col, width in column_widths.items():
