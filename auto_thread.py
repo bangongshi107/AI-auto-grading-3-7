@@ -3059,6 +3059,10 @@ class GradingThread(QThread):
                     self.log_signal.emit(f"{api_name}评分成功", False, "INFO")
                 self.last_used_api = api_key
                 self._unattended_auto_score_count = 0
+                # 每次成功后交替切换到另一个API，降低限流风险、提升效率（无人模式与普通模式均适用）
+                other_api = api_configs[api_key]["other"]
+                self.current_api = other_api
+                self.log_signal.emit(f"下一张将使用 {api_configs[other_api]['name']} 评分（交替策略）", False, "DETAIL")
                 return score, reasoning, scores, confidence, response_text
             
             # 异常试卷不重试
