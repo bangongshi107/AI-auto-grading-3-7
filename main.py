@@ -176,7 +176,7 @@ class SimpleNotificationDialog(QDialog):
 
 
 class ManualInterventionDialog(QDialog):
-    """专用于人工介入提示的模态对话框，带重复提示音和明确的继续/停止按钮"""
+    """专用于人工介入提示的模态对话框，带重复提示音提醒用户处理"""
     def __init__(self, title, message, raw_feedback=None, sound_type='error', parent=None):
         super().__init__(parent)
         self.sound_type = sound_type
@@ -220,13 +220,11 @@ class ManualInterventionDialog(QDialog):
 
         # 按钮区域
         button_layout = QHBoxLayout()
-        continue_btn = QPushButton("我已人工处理，继续")
-        stop_btn = QPushButton("暂停并关闭")
-        continue_btn.clicked.connect(self.accept)
-        stop_btn.clicked.connect(self.reject)
+        confirm_btn = QPushButton("我知道了")
+        confirm_btn.clicked.connect(self.accept)
+        confirm_btn.setDefault(True)  # 设置为默认按钮，支持回车键确认
         button_layout.addStretch()
-        button_layout.addWidget(continue_btn)
-        button_layout.addWidget(stop_btn)
+        button_layout.addWidget(confirm_btn)
         button_layout.addStretch()
 
         layout.addLayout(button_layout)
@@ -256,10 +254,11 @@ class ManualInterventionDialog(QDialog):
             self.sound_timer.stop()
         super().accept()
 
-    def reject(self):
+    def closeEvent(self, a0):
+        """窗口关闭时停止提示音"""
         if hasattr(self, 'sound_timer'):
             self.sound_timer.stop()
-        super().reject()
+        super().closeEvent(a0)
 
 
 class SignalConnectionManager:
@@ -710,13 +709,15 @@ class Application:
         self.main_window.activateWindow()  # 激活窗口
 
     def show_manual_intervention_notification(self, message, raw_feedback):
-        """当工作线程请求人工介入时调用，展示更明显的模态对话框并播放提示音。
+        """当工作线程请求人工介入时调用，展示模态对话框并播放提示音。
         
-        根据用户选择：
-        - 点击"我已人工处理，继续"：恢复UI状态，不停止worker（worker已自行停止）
-        - 点击"暂停并关闭"：确保worker停止
+        流程说明：
+        1. worker线程检测到需要人工介入的情况，已自动停止
+        2. 弹出对话框通知用户，说明具体原因
+        3. 用户了解情况后关闭对话框
+        4. 用户人工处理完问题后，需要手动点击主窗口的"开始阅卷"按钮继续
         
-        参数说明（优化后）：
+        参数说明：
         - message: AI判断的具体原因（如"学生提交的内容为风景图片，无法评分"）
         - raw_feedback: 学生答案摘要（如"提交了一张湖岸树林的风景图片..."）
         """
@@ -726,40 +727,32 @@ class Application:
         except Exception:
             self._suppress_error_dialog_until = 0.0
 
-        # 只恢复UI状态，不重复走 on_worker_error（避免日志/建议堆叠）
+        # 恢复UI状态（worker已自动停止）
         if self.main_window.isMinimized():
             self.main_window.showNormal()
             self.main_window.activateWindow()
         if hasattr(self.main_window, 'update_ui_state'):
             self.main_window.update_ui_state(is_running=False)
 
-        # 【优化】构建用户友好的弹窗消息
-        # message 现在是 AI 的具体判断原因，不再是简单的"需人工介入"
+        # 构建用户友好的弹窗消息
         display_message = message.strip() if message else "AI判断需要人工介入"
         
         # 显示模态对话框
         dialog = ManualInterventionDialog(
             title="需要人工处理",
-            message=(f"{display_message}\n\n请人工检查并处理当前试卷。"),
+            message=(f"{display_message}\n\n请人工检查并处理当前试卷。\n处理完毕后，点击主窗口的\"开始阅卷\"按钮继续。"),
             raw_feedback=raw_feedback,
             sound_type='error',
             parent=self.main_window
         )
-        result = dialog.exec_()
+        dialog.exec_()
         
-        # 根据用户选择处理
-        # QDialog.Accepted = 用户点击"我已人工处理，继续"
-        # QDialog.Rejected = 用户点击"暂停并关闭"
-        if result == QDialog.Rejected:
-            # 用户选择停止：确保worker被停止
-            if self.worker.isRunning():
-                self.worker.stop()
-                self.main_window.log_message("用户选择暂停，已停止自动阅卷。", True, "INFO")
-        else:
-            # 用户选择继续：worker已经因error_signal停止，这里只记录日志
-            self.main_window.log_message("用户已完成人工处理，可重新开始自动阅卷。", False, "INFO")
+        # 对话框关闭后，确保worker已停止并记录日志
+        if self.worker.isRunning():
+            self.worker.stop()
+        self.main_window.log_message("已暂停阅卷，等待用户处理问题后手动重新开始。", False, "INFO")
         
-        # 对话框关闭后，确保主窗口恢复并显示在前台
+        # 确保主窗口恢复并显示在前台
         if self.main_window.isMinimized():
             self.main_window.showNormal()
         self.main_window.raise_()  # 将窗口提升到最前
