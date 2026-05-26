@@ -986,7 +986,7 @@ class Application:
                        work_mode_display,
                        ocr_text,
                        ocr_model_id,
-                       record_data.get('api1_model_id', '未指定'),
+                       f"AI 1\n\n模型{record_data.get('api1_model_id', '未指定')}",
                        str(record_data.get('api1_itemized_scores', [])),
                        _format_basis_with_newlines(record_data.get('api1_scoring_basis', '未提供')),
                        str(record_data.get('api1_raw_score', 0.0)),
@@ -1000,7 +1000,7 @@ class Application:
                        work_mode_display,
                        ocr_text,
                        ocr_model_id,
-                       record_data.get('api2_model_id', '未指定'),
+                       f"AI 2\n\n模型{record_data.get('api2_model_id', '未指定')}",
                        str(record_data.get('api2_itemized_scores', [])),
                        _format_basis_with_newlines(record_data.get('api2_scoring_basis', '未提供')),
                        str(record_data.get('api2_raw_score', 0.0)),
@@ -1015,12 +1015,14 @@ class Application:
                 ocr_text = record_data.get('ocr_text', '')
                 ocr_model_id = record_data.get('ocr_model_id', '')
                 grade_model_id = record_data.get('grade_model_id', record_data.get('first_model_id', '未指定'))
+                api_label_display = record_data.get('api_label', 'AI 1')
+                model_display = f"{api_label_display}\n\n模型{grade_model_id}"
                 single_row = [question_index_str,
                              record_data.get('student_answer', '无法提取'),
                              work_mode_display,
                              ocr_text,
                              ocr_model_id,
-                             grade_model_id,
+                             model_display,
                              str(record_data.get('sub_scores', '未提供')),
                              _format_basis_with_newlines(record_data.get('reasoning_basis', '无法提取')),
                              final_total_score_str,

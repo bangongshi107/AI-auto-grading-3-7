@@ -570,18 +570,6 @@ class ScoreProcessor:
         return cleaned_scores, total
 
 
-# ==================== 向后兼容的辅助函数 ====================
-
-def sanitize_score(val):
-    """向后兼容：调用 ScoreProcessor.sanitize()"""
-    return ScoreProcessor.sanitize(val)
-
-
-def round_to_step(value: float, step: float) -> float:
-    """向后兼容：调用 ScoreProcessor.round_to_step()"""
-    return ScoreProcessor.round_to_step(value, step)
-
-
 # ==================== 统一重试机制 ====================
 
 class ErrorRetryability(Enum):
@@ -689,31 +677,8 @@ def unified_retry(
     operation_name: str = "操作"
 ):
     """
-    统一重试装饰器（v2.0），适用于API调用等需要重试的操作。
-    
-    新特性（v2.0）：
-    - ✨ 指数退避：根据重试次数自动增加延迟（1s, 2s, 4s...）
-    - ✨ 错误感知延迟：不同错误类型使用不同的基础延迟
-    - ✨ 精细错误分类：四级分类（明确可重试、可能可重试、不值得重试、需人工介入）
-    - ✨ 随机抖动：避免多个请求同时重试造成雪崩
-    
-    设计原则：
-    - 统一重试次数为最多1次（首次+1次重试=共2次尝试）
-    - 只对有重试价值的短暂性错误重试（网络、超时、token等）
-    - 对业务/配置错误立即失败，不浪费调用次数
-    - 节省token调用次数，降低开销
-    
-    Args:
-        max_retries: 最大重试次数，默认1次（总共尝试2次）
-        transient_error_checker: 函数，判断异常是否为短暂性可重试错误，接收Exception返回bool
-        retry_delay: 重试前的基础延迟时间（秒），默认1.0秒（会根据错误类型智能调整）
-        log_callback: 日志回调函数，签名为 (message: str, is_important: bool, level: str)
-        operation_name: 操作名称，用于日志
-    
-    Returns:
-        装饰器函数
-    
-    使用示例: (略)
+    统一重试装饰器：对短暂性错误（网络超时、限流等）最多重试 max_retries 次，
+    对业务/配置错误立即失败。延迟采用指数退避+错误感知策略。
     """
     def decorator(func: Callable) -> Callable:
         @wraps(func)
@@ -811,7 +776,6 @@ def unified_retry(
             
         return wrapper
     return decorator
-
 
 
 class GradingThread(QThread):
@@ -1226,65 +1190,84 @@ class GradingThread(QThread):
             }
         }
 
-        # 交叉重试策略：API1→API2→API1→API2，最多4次
-        last_error = None
-        start_api = self.current_api
-        other_start = api_configs[start_api]["other"]
-        api_sequence = [start_api, other_start, start_api, other_start]
-        
-        # 首次检查熔断
-        try:
-            if self._is_api_in_cooldown(start_api) and not self._is_api_in_cooldown(other_start):
-                self.log_signal.emit(f"{api_configs[start_api]['name']}处于短期熔断，切换到备用API优先", False, "INFO")
-                api_sequence = [other_start, start_api, other_start, start_api]
-        except Exception:
-            pass
+        # 无人模式：长等待重试外层循环
+        _max_long_retries = int(getattr(self, 'unattended_max_retry_rounds', 10))
+        _long_retry_count = 0
 
-        for attempt_idx, api_key in enumerate(api_sequence):
-            current_config = api_configs[api_key]
-            api_func = current_config["func"]
-            api_name = current_config["name"]
-            
-            if attempt_idx > 0:
-                self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 切换到{api_name}重试...", False, "INFO")
-                time.sleep(1.0)
-            
-            self.current_api = api_key
-            self.log_signal.emit(f"使用{api_name}进行OCR识别...", False, "INFO")
+        while True:
+            # 交叉重试策略：API1→API2→API1→API2，最多4次
+            last_error = None
+            start_api = self.current_api
+            other_start = api_configs[start_api]["other"]
+            api_sequence = [start_api, other_start, start_api, other_start]
 
-            extracted_text, readability, is_blank, notes, response_text, error = self._call_and_process_ocr_api(
-                img_str,
-                prompt,
-                question_index,
-                api_call_func=api_func,
-                api_name=api_name,
-                api_key=api_key
-            )
+            # 首次检查熔断
+            try:
+                if self._is_api_in_cooldown(start_api) and not self._is_api_in_cooldown(other_start):
+                    self.log_signal.emit(f"{api_configs[start_api]['name']}处于短期熔断，切换到备用API优先", False, "INFO")
+                    api_sequence = [other_start, start_api, other_start, start_api]
+            except Exception:
+                pass
 
-            if not self.running:
-                return None, None, None, None, response_text, "线程已停止（人工介入或用户取消）"
+            for attempt_idx, api_key in enumerate(api_sequence):
+                current_config = api_configs[api_key]
+                api_func = current_config["func"]
+                api_name = current_config["name"]
 
-            if not error:
-                self.last_used_ocr_api = api_key
                 if attempt_idx > 0:
-                    self.log_signal.emit(f"{api_name}第{attempt_idx + 1}次尝试OCR成功", False, "INFO")
-                return extracted_text, readability, is_blank, notes, response_text, None
+                    self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 切换到{api_name}重试...", False, "INFO")
+                    time.sleep(1.0)
 
-            last_error = error
-            self.log_signal.emit(f"{api_name} OCR失败（第{attempt_idx + 1}/4次尝试）", False, "WARNING")
+                self.current_api = api_key
+                self.log_signal.emit(f"使用{api_name}进行OCR识别...", False, "INFO")
 
-        self._stop_grading(
-            reason=StopReason.API_ERROR,
-            message="两个AI接口交叉重试均失败，请检查网络或密钥配置",
-            detail="请检查: 1)网络连接 2)API密钥 3)模型ID",
-            emit_signal=False
-        )
-        self.manual_intervention_signal.emit(
-            "两个AI接口交叉重试均失败",
-            "请检查: 1)网络连接 2)API密钥 3)模型ID"
-        )
+                extracted_text, readability, is_blank, notes, response_text, error = self._call_and_process_ocr_api(
+                    img_str,
+                    prompt,
+                    question_index,
+                    api_call_func=api_func,
+                    api_name=api_name,
+                    api_key=api_key
+                )
 
-        return None, None, None, None, "", "两个AI接口均失败"
+                if not self.running:
+                    return None, None, None, None, response_text, "线程已停止（人工介入或用户取消）"
+
+                if not error:
+                    self.last_used_ocr_api = api_key
+                    if attempt_idx > 0:
+                        self.log_signal.emit(f"{api_name}第{attempt_idx + 1}次尝试OCR成功", False, "INFO")
+                    return extracted_text, readability, is_blank, notes, response_text, None
+
+                last_error = error
+                self.log_signal.emit(f"{api_name} OCR失败（第{attempt_idx + 1}/4次尝试）", False, "WARNING")
+
+            # ── 4次全部失败后的处理 ──
+
+            # 无人模式：长等待后重试
+            if self.unattended_mode_enabled and _long_retry_count < _max_long_retries:
+                _long_retry_count += 1
+                if not self._unattended_long_wait(_long_retry_count, _max_long_retries):
+                    return None, None, None, None, "", "用户停止"
+                continue  # 重新进入外层循环
+
+            # 无人模式已用尽 / 非无人模式：停止
+            if self.unattended_mode_enabled:
+                self.log_signal.emit(
+                    f"[无人模式] OCR已长等待重试 {_max_long_retries} 次仍失败，停止阅卷",
+                    True, "ERROR"
+                )
+            self._stop_grading(
+                reason=StopReason.API_ERROR,
+                message="两个AI接口交叉重试均失败，请检查网络或密钥配置",
+                detail="请检查: 1)网络连接 2)API密钥 3)模型ID",
+                emit_signal=False
+            )
+            self.manual_intervention_signal.emit(
+                "两个AI接口交叉重试均失败",
+                "请检查: 1)网络连接 2)API密钥 3)模型ID"
+            )
+            return None, None, None, None, "", "两个AI接口均失败"
 
     def _call_and_process_text_grading_with_failover(self, text_prompt: dict, q_config: dict, question_index: int):
         """工作模式二评分阶段的故障转移（与工作模式一保持一致）。"""
@@ -1301,100 +1284,109 @@ class GradingThread(QThread):
             }
         }
 
-        # 交叉重试策略：API1→API2→API1→API2，最多4次
-        last_error = None
-        manual_intervention_error = None
-        last_response_text = ""
-        start_api = self.current_api
-        other_start = api_configs[start_api]["other"]
-        api_sequence = [start_api, other_start, start_api, other_start]
-        
-        # 首次检查熔断
-        try:
-            if self._is_api_in_cooldown(start_api) and not self._is_api_in_cooldown(other_start):
-                self.log_signal.emit(f"{api_configs[start_api]['name']}处于短期熔断，切换到备用API优先", False, "INFO")
-                api_sequence = [other_start, start_api, other_start, start_api]
-        except Exception:
-            pass
+        # 无人模式：长等待重试外层循环
+        _max_long_retries = int(getattr(self, 'unattended_max_retry_rounds', 10))
+        _long_retry_count = 0
 
-        for attempt_idx, api_key in enumerate(api_sequence):
-            current_config = api_configs[api_key]
-            api_func = current_config["func"]
-            api_name = current_config["name"]
-            
-            if attempt_idx > 0:
-                self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 切换到{api_name}重试...", False, "INFO")
-                time.sleep(1.0)
-            
-            self.current_api = api_key
-            self.log_signal.emit(f"使用{api_name}进行评分...", False, "INFO")
+        while True:
+            # 交叉重试策略：API1→API2→API1→API2，最多4次
+            last_error = None
+            manual_intervention_error = None
+            last_response_text = ""
+            start_api = self.current_api
+            other_start = api_configs[start_api]["other"]
+            api_sequence = [start_api, other_start, start_api, other_start]
 
-            score, reasoning, itemized_scores, confidence, response_text, error = self._call_and_process_single_api(
-                api_func,
-                "",
-                text_prompt,
-                q_config,
-                api_name=api_name,
-                api_key=api_key
-            )
-            last_response_text = response_text or last_response_text
+            # 首次检查熔断
+            try:
+                if self._is_api_in_cooldown(start_api) and not self._is_api_in_cooldown(other_start):
+                    self.log_signal.emit(f"{api_configs[start_api]['name']}处于短期熔断，切换到备用API优先", False, "INFO")
+                    api_sequence = [other_start, start_api, other_start, start_api]
+            except Exception:
+                pass
 
-            if not self.running:
-                return None, None, None, None, last_response_text, "线程已停止（人工介入或用户取消）"
+            for attempt_idx, api_key in enumerate(api_sequence):
+                current_config = api_configs[api_key]
+                api_func = current_config["func"]
+                api_name = current_config["name"]
 
-            if not error:
-                self.last_used_api = api_key
                 if attempt_idx > 0:
-                    self.log_signal.emit(f"{api_name}第{attempt_idx + 1}次尝试评分成功", False, "INFO")
-                return score, reasoning, itemized_scores, confidence, response_text, None
+                    self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 切换到{api_name}重试...", False, "INFO")
+                    time.sleep(1.0)
 
-            if isinstance(error, dict) and error.get('anomaly_paper'):
-                return None, None, None, None, response_text, error
+                self.current_api = api_key
+                self.log_signal.emit(f"使用{api_name}进行评分...", False, "INFO")
 
-            if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入", "需要人工介入"]):
-                manual_intervention_error = error
+                score, reasoning, itemized_scores, confidence, response_text, error = self._call_and_process_single_api(
+                    api_func,
+                    "",
+                    text_prompt,
+                    q_config,
+                    api_name=api_name,
+                    api_key=api_key
+                )
+                last_response_text = response_text or last_response_text
+
+                if not self.running:
+                    return None, None, None, None, last_response_text, "线程已停止（人工介入或用户取消）"
+
+                if not error:
+                    self.last_used_api = api_key
+                    if attempt_idx > 0:
+                        self.log_signal.emit(f"{api_name}第{attempt_idx + 1}次尝试评分成功", False, "INFO")
+                    return score, reasoning, itemized_scores, confidence, response_text, None
+
+                if isinstance(error, dict) and error.get('anomaly_paper'):
+                    return None, None, None, None, response_text, error
+
+                if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入", "需要人工介入"]):
+                    manual_intervention_error = error
+                    last_error = error
+                    if not self.unattended_mode_enabled:
+                        if attempt_idx == 0:
+                            # 非无人模式：先用另一组API重试一次，再弹窗
+                            self.log_signal.emit(f"{api_name}请求人工介入，尝试另一组API重试一次...", False, "WARNING")
+                            continue
+                        else:
+                            # 已尝试过另一组API，通知用户处理
+                            self.log_signal.emit(f"{api_name}请求人工介入，立即通知用户处理", False, "WARNING")
+                            break
+                    self.log_signal.emit(f"{api_name}请求人工介入，尝试交叉重试...", False, "WARNING")
+                    continue
+
                 last_error = error
-                if not self.unattended_mode_enabled:
-                    # 非无人模式：立即通知用户，无需交叉重试
-                    self.log_signal.emit(f"{api_name}请求人工介入，立即通知用户处理", False, "WARNING")
-                    break
-                self.log_signal.emit(f"{api_name}请求人工介入，尝试交叉重试...", False, "WARNING")
-                continue
+                self.log_signal.emit(f"{api_name}评分失败（第{attempt_idx + 1}/4次尝试）", False, "WARNING")
 
-            last_error = error
-            self.log_signal.emit(f"{api_name}评分失败（第{attempt_idx + 1}/4次尝试）", False, "WARNING")
+            # ── 4次交叉重试全部失败后的处理 ──
 
-        # 重试循环结束（4次全部失败，或非无人模式提前退出）
-        if manual_intervention_error:
-            return None, None, None, None, last_response_text, manual_intervention_error
-        
-        self._stop_grading(
-            reason=StopReason.API_ERROR,
-            message="两个AI接口交叉重试均失败，请检查网络或密钥配置",
-            detail="请检查: 1)网络连接 2)API密钥 3)模型ID",
-            emit_signal=False
-        )
-        self.manual_intervention_signal.emit(
-            "两个AI接口交叉重试均失败",
-            "请检查: 1)网络连接 2)API密钥 3)模型ID"
-        )
+            # 重试循环结束（4次全部失败，或非无人模式提前退出）
+            if manual_intervention_error:
+                return None, None, None, None, last_response_text, manual_intervention_error
 
-        return None, None, None, None, "", f"评分失败（已交叉重试4次）: {last_error}"
+            # 普通API故障（网络/限流）：无人模式长等待后重试
+            if self.unattended_mode_enabled and _long_retry_count < _max_long_retries:
+                _long_retry_count += 1
+                if not self._unattended_long_wait(_long_retry_count, _max_long_retries):
+                    return None, None, None, None, last_response_text, "用户停止"
+                continue  # 重新进入外层循环
 
-    def _is_unrecognizable_answer(self, student_answer_summary, itemized_scores, scoring_basis=None):
-        """
-        检查学生答案是否无法识别。
-        当AI判断图片无法识别时，会返回特定的摘要内容和全零分。
-
-        Args:
-            student_answer_summary: AI返回的学生答案摘要
-            itemized_scores: 分项得分列表
-
-        Returns:
-            bool: True表示无法识别，False表示可以识别
-        """
-        if not student_answer_summary:
-            return False
+            # 无人模式已用尽 / 非无人模式：停止
+            if self.unattended_mode_enabled:
+                self.log_signal.emit(
+                    f"[无人模式] 文字评分已长等待重试 {_max_long_retries} 次仍失败，停止阅卷",
+                    True, "ERROR"
+                )
+            self._stop_grading(
+                reason=StopReason.API_ERROR,
+                message="两个AI接口交叉重试均失败，请检查网络或密钥配置",
+                detail="请检查: 1)网络连接 2)API密钥 3)模型ID",
+                emit_signal=False
+            )
+            self.manual_intervention_signal.emit(
+                "两个AI接口交叉重试均失败",
+                "请检查: 1)网络连接 2)API密钥 3)模型ID"
+            )
+            return None, None, None, None, "", f"评分失败（已交叉重试4次）: {last_error}"
 
         # 仅在“完全无法识别 + 无有效答案/内容”这类高置信场景触发。
         # 注意：避免把“部分看不清/部分无法识别”当成整题无法识别。
@@ -1440,40 +1432,88 @@ class GradingThread(QThread):
             return default_value
 
     def _detect_blank_answer_feedback(self, student_answer_summary: str, scoring_basis: str) -> Optional[str]:
-        """检测空白/未作答（应当允许直接判0分，不应自动升级为异常卷）。"""
+        """检测空白/未作答。
+
+        核心原则：只在 AI 给出明确、肯定的"答案为空/未作答"结论时触发。
+        避免 AI 描述答卷时顺带提到"空白"二字而误判（如"部分空白"、"空白处"）。
+        """
         if not student_answer_summary and not scoring_basis:
             return None
 
-        # 优先使用摘要判断；摘要非空时不使用 scoring_basis，以避免“部分未作答”误判整题空白
+        # 优先使用摘要；摘要非空时不使用 scoring_basis，避免"部分未作答"误判整题空白
         if student_answer_summary and str(student_answer_summary).strip():
             combined = str(student_answer_summary).strip()
         else:
             combined = str(scoring_basis or "").strip()
 
-        s = combined.lower()
-
-        # 明确的“图片为空/图像为空”等属于配置或截图问题，仍应走异常卷/人工，不当作空白作答
+        # 排除：明确是图片配置问题（走异常卷/人工，不走空白作答）
         severe_image_empty = [
             "图片为空", "图像为空", "空白图片", "空白图像", "图像空白", "图片空白",
         ]
         if any(k in combined for k in severe_image_empty):
             return None
 
+        # 排除："部分空白"、"空白处"等描述性表述——说明答卷并非完全空白
+        partial_exclusions = [
+            r'部分空白', r'局部空白', r'大部分空白', r'空白处', r'留白',
+        ]
+        for p in partial_exclusions:
+            if re.search(p, combined):
+                return None
+
+        s = combined.lower()
+
+        # 【高置信】明确、肯定的"完全空白/未作答"结论
         blank_patterns = [
-            r'空白(?:试卷|卷|答卷)?', r'未作答', r'无作答', r'无答案',
-            r'无内容', r'内容为空', r'无有效内容',
-            r'no\s*(?:answer|content|response)', r'blank\s*(?:answer|response)',
+            r'未(?:进行)?作答',
+            r'没有(?:任何)?(?:作答|填写|书写)',
+            r'无(?:任何)?(?:作答|答案|内容|文字)',
+            r'(?:答案|内容|作答)(?:为)?(?:空白|空|缺失)',
+            r'(?:完全|全部|整题)(?:空白|未作答)',
+            r'no\s*(?:answer|content|response)',
+            r'blank\s*(?:answer|response)',
+            r"(?:student\s*)?(?:did\s*not|didn't)\s*(?:answer|write|respond)",
         ]
 
         for p in blank_patterns:
             try:
-                if re.search(p, s):
-                    m = re.search(p, s)
-                    return m.group(0) if m is not None else p
+                m = re.search(p, s)
+                if m:
+                    return m.group(0)
             except re.error:
                 continue
 
         return None
+    def _is_unrecognizable_answer(self, student_answer_summary, itemized_scores_from_json, scoring_basis) -> bool:
+        """判断学生答案图片是否完全无法识别（严格匹配，用于触发人工介入）。
+
+        区别于 _detect_gibberish_or_doodle_feedback（宽松警告），本方法仅在答案
+        图片完全不可读时返回 True，同时要求 itemized_scores 无有效分项，避免误判。
+        """
+        if not student_answer_summary and not scoring_basis:
+            return False
+
+        text = str(student_answer_summary or scoring_basis or "").lower()
+
+        # 严格的"完全无法识别"关键词，排除"局部看不清"类
+        hard_patterns = [
+            r'图片无法识别', r'答案无法识别', r'无法读取.*图片', r'图片.*无法读取',
+            r'图片内容.*无法.*提取', r'无有效.*文字', r'未能识别.*答案',
+            r'image.*cannot.*be.*recognized', r'unable.*to.*recognize.*image',
+            r'cannot.*extract.*text', r'no.*readable.*content',
+        ]
+
+        matched = any(re.search(p, text) for p in hard_patterns)
+        if not matched:
+            return False
+
+        # 只有当 itemized_scores 也确实为空/None 时，才认定为"完全无法识别"
+        # 避免 AI 仅在 scoring_basis 里顺带提及看不清而误判
+        scores_empty = (
+            itemized_scores_from_json is None
+            or (isinstance(itemized_scores_from_json, list) and len(itemized_scores_from_json) == 0)
+        )
+        return scores_empty
 
     def _detect_gibberish_or_doodle_feedback(self, student_answer_summary: str, scoring_basis: str) -> Optional[str]:
         """检测乱码/涂画/乱写等（可配置为0分或人工）。"""
@@ -1892,6 +1932,53 @@ class GradingThread(QThread):
         )
         
         return (auto_score, reason)
+
+    def _unattended_long_wait(self, attempt: int, total_rounds: int) -> bool:
+        """无人模式：API全部失败后的长等待（分块睡眠，可被用户停止打断）。
+
+        用于处理免费API限流（429/503等）：等待足够时间让配额恢复，
+        再重新尝试整轮 API 交叉重试，实现真正意义上的无人持续运行。
+
+        Args:
+            attempt: 本次是第几次长等待重试（从1开始）
+            total_rounds: 最大长等待重试轮数
+
+        Returns:
+            True  → 等待结束，应继续重试
+            False → 等待期间用户停止，应退出
+        """
+        wait_sec = int(getattr(self, 'unattended_retry_delay', 900))
+        wait_min = wait_sec // 60
+        self.log_signal.emit(
+            f"[无人模式] 所有API均失败（可能为限流/网络波动），"
+            f"等待 {wait_min} 分钟后进行第 {attempt}/{total_rounds} 次长等待重试...",
+            True, "WARNING"
+        )
+
+        chunk = 30  # 每30秒检查一次是否需要停止
+        elapsed = 0
+        while elapsed < wait_sec:
+            if not self.running:
+                self.log_signal.emit("[无人模式] 等待期间检测到停止指令，已取消重试", False, "INFO")
+                return False
+            sleep_this = min(chunk, wait_sec - elapsed)
+            time.sleep(sleep_this)
+            elapsed += sleep_this
+            remaining = wait_sec - elapsed
+            # 每5分钟提示一次剩余等待时间
+            if remaining > 0 and elapsed % 300 == 0:
+                self.log_signal.emit(
+                    f"[无人模式] 等待中，还剩约 {(remaining + 59) // 60} 分钟...",
+                    False, "INFO"
+                )
+
+        if not self.running:
+            return False
+        self.log_signal.emit(
+            f"[无人模式] 等待结束，开始第 {attempt} 次重试...",
+            False, "INFO"
+        )
+        return True
 
     def _set_error_state(self, reason, error: Optional[GradingError] = None):
         """统一设置错误状态（线程安全）
@@ -2420,27 +2507,18 @@ class GradingThread(QThread):
             # 无人模式：自动重试逻辑
             if self.unattended_mode_enabled and self._unattended_retry_count < self.unattended_max_retry_rounds:
                 self._unattended_retry_count += 1
-                self.log_signal.emit(
-                    f"[无人模式] 检测到可重试错误，准备第 {self._unattended_retry_count}/{self.unattended_max_retry_rounds} 次重试",
-                    False, "WARNING"
-                )
 
-                # 进入重试状态（状态变更和日志在同一原子操作中）
+                # 进入重试状态
                 with self._state_lock:
                     self.running = True
                     self.completion_status = "retrying"
-
-                    # 在锁内发送信号，确保状态和信号的原子性
                     try:
-                        self.log_signal.emit(
-                            f"[无人模式] 等待 {self.unattended_retry_delay} 秒后重试...",
-                            False, "INFO"
-                        )
+                        pass  # 状态已设置，日志在下面统一打印
                     except:
                         pass
 
-                # 等待重试延迟（在锁外执行，避免长时间持有锁）
-                time.sleep(self.unattended_retry_delay)
+                # 使用可中断的长等待（在锁外执行，避免长时间持有锁）
+                self._unattended_long_wait(self._unattended_retry_count, self.unattended_max_retry_rounds)
             elif self.unattended_mode_enabled:
                 self.log_signal.emit(
                     f"[无人模式] 已达到最大重试次数 ({self.unattended_max_retry_rounds})，停止重试",
@@ -2598,7 +2676,7 @@ class GradingThread(QThread):
             
             # 加载无人模式配置（每次任务启动都同步最新配置）
             self.unattended_mode_enabled = params.get('unattended_mode_enabled', False) if isinstance(params, dict) else False
-            self.unattended_retry_delay = params.get('unattended_retry_delay', 120) if isinstance(params, dict) else 120
+            self.unattended_retry_delay = params.get('unattended_retry_delay', 900) if isinstance(params, dict) else 900
             self.unattended_max_retry_rounds = params.get('unattended_max_retry_rounds', 10) if isinstance(params, dict) else 10
             
             if self.unattended_mode_enabled:
@@ -2954,15 +3032,17 @@ class GradingThread(QThread):
     def _evaluate_with_failover(self, img_str, prompt, current_question_config):
         """
         带故障转移的答案评估（单评模式专用）。
-        
+
         工作流程：
         1. 使用当前活跃的API（self.current_api）进行评分
         2. 如果成功：继续使用此API
-        3. 如果失败：切换到另一个API重试
-        4. 如果切换后的API也失败：停止阅卷，发出人工介入信号
-        
+        3. 如果失败：切换到另一个API重试（最多4次交叉）
+        4. 如果4次均失败：
+           - 非无人模式 → 停止，发出人工介入信号
+           - 无人模式   → 长等待（默认15分钟）后重试整轮，直到成功或达到上限
+
         说明：不分主次API，哪个API在运行就用哪个，失败后自动切换到另一个
-        
+
         Returns:
             与 evaluate_answer 相同的返回格式
         """
@@ -2975,155 +3055,183 @@ class GradingThread(QThread):
             },
             "second": {
                 "func": self.api_service.call_second_api,
-                "name": "API 2", 
+                "name": "API 2",
                 "other": "first"
             }
         }
-        
-        # 尝试次数（最多尝试两个API各一次）
-# 交叉重试策略：API1→API2→API1→API2，最多4次
-        # 交叉切换天然提供冷却间隔，对限流/截图时序问题更友好
-        last_error = None
-        last_response_text = ""
-        manual_intervention_error = None  # 记录人工介入错误，用于最终处理
-        start_api = self.current_api
-        api_sequence = []
-        
-        # 构建交叉序列：从当前API开始交替
-        other_start = api_configs[start_api]["other"]
-        api_sequence = [start_api, other_start, start_api, other_start]
 
-        for attempt_idx, api_key in enumerate(api_sequence):
-            current_config = api_configs[api_key]
-            api_func = current_config["func"]
-            api_name = current_config["name"]
-            
-            # 首次尝试时检查熔断，仅在第一轮做一次切换判断
-            if attempt_idx == 0:
-                try:
-                    other_api = current_config["other"]
-                    if self._is_api_in_cooldown(api_key) and not self._is_api_in_cooldown(other_api):
-                        self.log_signal.emit(f"{api_name}处于短期熔断，切换到备用API优先", False, "INFO")
-                        # 反转整个序列
-                        api_sequence = [other_api, api_key, other_api, api_key]
-                        api_key = api_sequence[0]
-                        current_config = api_configs[api_key]
-                        api_func = current_config["func"]
-                        api_name = current_config["name"]
-                except Exception:
-                    pass
-            
-            # 第2次及以后的重试，先短暂等待（交叉切换天然提供冷却）
-            if attempt_idx > 0:
-                # 人工介入场景：可能是截图问题，等待更长时间并重新截图
-                if manual_intervention_error and self._current_answer_area_data:
-                    self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 等待2秒后重新截图...", False, "WARNING")
-                    time.sleep(2.0)
+        # 无人模式：长等待重试外层循环
+        _max_long_retries = int(getattr(self, 'unattended_max_retry_rounds', 10))
+        _long_retry_count = 0
+
+        while True:
+            # 交叉重试策略：API1→API2→API1→API2，最多4次
+            last_error = None
+            last_response_text = ""
+            manual_intervention_error = None  # 记录人工介入错误，用于最终处理
+            start_api = self.current_api
+
+            # 构建交叉序列：从当前API开始交替
+            other_start = api_configs[start_api]["other"]
+            api_sequence = [start_api, other_start, start_api, other_start]
+
+            for attempt_idx, api_key in enumerate(api_sequence):
+                current_config = api_configs[api_key]
+                api_func = current_config["func"]
+                api_name = current_config["name"]
+
+                # 首次尝试时检查熔断，仅在第一轮做一次切换判断
+                if attempt_idx == 0:
                     try:
-                        new_img_str = self._capture_question_area(self._current_answer_area_data)
-                        if new_img_str:
-                            img_str = new_img_str
-                            self.log_signal.emit("已重新截图", False, "INFO")
-                            manual_intervention_error = None  # 重置，用新图再试
-                    except Exception as e:
-                        self.log_signal.emit(f"重新截图失败: {e}", False, "WARNING")
-                else:
-                    # 普通失败：短暂等待1秒后切换API重试
-                    self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 切换到{api_name}重试...", False, "INFO")
-                    time.sleep(1.0)
-            
-            self.log_signal.emit(f"使用{api_name}进行评分...", False, "INFO")
-            self.current_api = api_key
-            
-            # 调用API
-            score, reasoning, scores, confidence, response_text, error = self._call_and_process_single_api(
-                api_func,
-                img_str,
-                prompt,
-                current_question_config,
-                api_name=api_name,
-                api_key=api_key
-            )
-            last_response_text = response_text or last_response_text
-            
-            # 调用API后检查线程状态
-            if not self.running:
-                self.log_signal.emit("检测到线程已停止，退出API交叉重试循环", False, "INFO")
-                return None, "线程已停止（人工介入或用户取消）", None, None, last_response_text
-            
-            if not error:
-                # 成功
+                        other_api = current_config["other"]
+                        if self._is_api_in_cooldown(api_key) and not self._is_api_in_cooldown(other_api):
+                            self.log_signal.emit(f"{api_name}处于短期熔断，切换到备用API优先", False, "INFO")
+                            # 反转整个序列
+                            api_sequence = [other_api, api_key, other_api, api_key]
+                            api_key = api_sequence[0]
+                            current_config = api_configs[api_key]
+                            api_func = current_config["func"]
+                            api_name = current_config["name"]
+                    except Exception:
+                        pass
+
+                # 第2次及以后的重试，先短暂等待（交叉切换天然提供冷却）
                 if attempt_idx > 0:
-                    self.log_signal.emit(f"{api_name}第{attempt_idx + 1}次尝试评分成功", False, "INFO")
-                else:
-                    self.log_signal.emit(f"{api_name}评分成功", False, "INFO")
-                self.last_used_api = api_key
-                self._unattended_auto_score_count = 0
-                # 每次成功后交替切换到另一个API，降低限流风险、提升效率（无人模式与普通模式均适用）
-                other_api = api_configs[api_key]["other"]
-                self.current_api = other_api
-                self.log_signal.emit(f"下一张将使用 {api_configs[other_api]['name']} 评分（交替策略）", False, "DETAIL")
-                return score, reasoning, scores, confidence, response_text
-            
-            # 异常试卷不重试
-            if isinstance(error, dict) and error.get('anomaly_paper'):
-                return None, None, None, None, response_text, error
-            
-            # 人工介入信号：非无人模式立即退出通知用户；无人模式则交叉重试
-            if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入", "需要人工介入"]):
-                manual_intervention_error = error
-                last_error = error
-                if not self.unattended_mode_enabled:
-                    # 非无人模式：立即通知用户，无需交叉重试
-                    self.log_signal.emit(f"{api_name}请求人工介入，立即通知用户处理", False, "WARNING")
-                    break
-                self.log_signal.emit(f"{api_name}请求人工介入，尝试交叉重试...", False, "WARNING")
-                continue  # 继续交叉重试
-            
-            # 普通失败：记录错误，继续交叉重试
-            last_error = error
-            self.log_signal.emit(f"{api_name}失败（第{attempt_idx + 1}/4次尝试）", False, "WARNING")
-        
-        # 4次交叉重试全部失败
-        # 如果最后的错误是人工介入，走人工介入处理
-        if manual_intervention_error:
-            if self.unattended_mode_enabled:
-                auto_result = self._handle_unattended_auto_score(
-                    current_question_config, img_str, manual_intervention_error
+                    # 人工介入场景：可能是截图问题，等待更长时间并重新截图
+                    if manual_intervention_error and self._current_answer_area_data:
+                        self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 等待2秒后重新截图...", False, "WARNING")
+                        time.sleep(2.0)
+                        try:
+                            new_img_str = self._capture_question_area(self._current_answer_area_data)
+                            if new_img_str:
+                                img_str = new_img_str
+                                self.log_signal.emit("已重新截图", False, "INFO")
+                                manual_intervention_error = None  # 重置，用新图再试
+                        except Exception as e:
+                            self.log_signal.emit(f"重新截图失败: {e}", False, "WARNING")
+                    else:
+                        # 普通失败：短暂等待1秒后切换API重试
+                        self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 切换到{api_name}重试...", False, "INFO")
+                        time.sleep(1.0)
+
+                self.log_signal.emit(f"使用{api_name}进行评分...", False, "INFO")
+                self.current_api = api_key
+
+                # 调用API
+                score, reasoning, scores, confidence, response_text, error = self._call_and_process_single_api(
+                    api_func,
+                    img_str,
+                    prompt,
+                    current_question_config,
+                    api_name=api_name,
+                    api_key=api_key
                 )
-                if auto_result is not None:
-                    auto_score, auto_reason = auto_result
-                    return auto_score, (auto_reason, auto_reason), [auto_score], {}, last_response_text
-            # 【修复】调用 _stop_grading 将 self.running 置为 False，
-            # 使 _process_single_question 中的保护判断 `if not self.running` 能正确生效，
-            # 避免触发误导性的 TYPE_SCORE_PARSE 错误（"AI返回的分数格式无效"）
-            ai_reason = manual_intervention_error
-            for prefix in ["需人工介入: ", "需人工介入：", "需要人工介入: ", "需要人工介入："]:
-                if isinstance(ai_reason, str) and ai_reason.startswith(prefix):
-                    ai_reason = ai_reason[len(prefix):].strip()
-                    break
+                last_response_text = response_text or last_response_text
+
+                # 调用API后检查线程状态
+                if not self.running:
+                    self.log_signal.emit("检测到线程已停止，退出API交叉重试循环", False, "INFO")
+                    return None, "线程已停止（人工介入或用户取消）", None, None, last_response_text
+
+                if not error:
+                    # 成功
+                    if attempt_idx > 0:
+                        self.log_signal.emit(f"{api_name}第{attempt_idx + 1}次尝试评分成功", False, "INFO")
+                    else:
+                        self.log_signal.emit(f"{api_name}评分成功", False, "INFO")
+                    self.last_used_api = api_key
+                    self._unattended_auto_score_count = 0
+                    # 每次成功后交替切换到另一个API，降低限流风险、提升效率（无人模式与普通模式均适用）
+                    other_api = api_configs[api_key]["other"]
+                    self.current_api = other_api
+                    self.log_signal.emit(f"下一张将使用 {api_configs[other_api]['name']} 评分（交替策略）", False, "DETAIL")
+                    return score, reasoning, scores, confidence, response_text
+
+                # 异常试卷不重试
+                if isinstance(error, dict) and error.get('anomaly_paper'):
+                    return None, None, None, None, response_text, error
+
+                # 人工介入信号：非无人模式先用另一组API重试一次再弹窗；无人模式则交叉重试
+                if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入", "需要人工介入"]):
+                    manual_intervention_error = error
+                    last_error = error
+                    if not self.unattended_mode_enabled:
+                        if attempt_idx == 0:
+                            # 非无人模式：先用另一组API重试一次，再弹窗
+                            self.log_signal.emit(f"{api_name}请求人工介入，尝试另一组API重试一次...", False, "WARNING")
+                            continue
+                        else:
+                            # 已尝试过另一组API，通知用户处理
+                            self.log_signal.emit(f"{api_name}请求人工介入，立即通知用户处理", False, "WARNING")
+                            break
+                    self.log_signal.emit(f"{api_name}请求人工介入，尝试交叉重试...", False, "WARNING")
+                    continue  # 继续交叉重试
+
+                # 普通失败：记录错误，继续交叉重试
+                last_error = error
+                self.log_signal.emit(f"{api_name}失败（第{attempt_idx + 1}/4次尝试）", False, "WARNING")
+
+            # ── 4次交叉重试全部失败后的处理 ──
+
+            # 如果最后的错误是人工介入，走人工介入处理（内容问题，不做长等待）
+            if manual_intervention_error:
+                if self.unattended_mode_enabled:
+                    auto_result = self._handle_unattended_auto_score(
+                        current_question_config, img_str, manual_intervention_error
+                    )
+                    if auto_result is not None:
+                        auto_score, auto_reason = auto_result
+                        return auto_score, (auto_reason, auto_reason), [auto_score], {}, last_response_text
+                # 非无人模式 / 无法自动处理：停止并通知
+                ai_reason = manual_intervention_error
+                for prefix in ["需人工介入: ", "需人工介入：", "需要人工介入: ", "需要人工介入："]:
+                    if isinstance(ai_reason, str) and ai_reason.startswith(prefix):
+                        ai_reason = ai_reason[len(prefix):].strip()
+                        break
+                self._stop_grading(
+                    reason=StopReason.MANUAL_INTERVENTION,
+                    message=ai_reason,
+                    detail="",
+                    emit_signal=True,
+                    log_level="WARNING"
+                )
+                return None, manual_intervention_error, None, None, last_response_text
+
+            # 普通API故障（网络/限流/服务不可用）
+            # 无人模式：长等待后重试整轮，真正实现无人持续运行
+            if self.unattended_mode_enabled and _long_retry_count < _max_long_retries:
+                _long_retry_count += 1
+                # 长等待（默认15分钟），等待期间可被用户停止
+                if not self._unattended_long_wait(_long_retry_count, _max_long_retries):
+                    return None, "用户停止", None, None, last_response_text
+                # 长等待结束，重新截图后再次进入外层 while 循环
+                if self._current_answer_area_data:
+                    try:
+                        new_img = self._capture_question_area(self._current_answer_area_data)
+                        if new_img:
+                            img_str = new_img
+                            self.log_signal.emit("[无人模式] 已重新截图，准备重试...", False, "INFO")
+                    except Exception as e:
+                        self.log_signal.emit(f"[无人模式] 重新截图失败（使用原图继续）: {e}", False, "WARNING")
+                continue  # 重新进入 while True 循环，再次尝试4次交叉重试
+
+            # 无人模式已用尽重试次数 / 非无人模式：停止
+            if self.unattended_mode_enabled:
+                self.log_signal.emit(
+                    f"[无人模式] 已长等待重试 {_max_long_retries} 次仍失败，停止阅卷",
+                    True, "ERROR"
+                )
             self._stop_grading(
-                reason=StopReason.MANUAL_INTERVENTION,
-                message=ai_reason,
-                detail="",
-                emit_signal=True,
-                log_level="WARNING"
+                reason=StopReason.API_ERROR,
+                message="两个AI接口交叉重试均失败，请检查网络或密钥配置",
+                detail="请检查: 1)网络连接 2)API密钥 3)模型ID",
+                emit_signal=False
             )
-            return None, manual_intervention_error, None, None, last_response_text
-        
-        # 普通API故障
-        self._stop_grading(
-            reason=StopReason.API_ERROR,
-            message="两个AI接口交叉重试均失败，请检查网络或密钥配置",
-            detail="请检查: 1)网络连接 2)API密钥 3)模型ID",
-            emit_signal=False
-        )
-        self.manual_intervention_signal.emit(
-            "两个AI接口交叉重试均失败",
-            "请检查: 1)网络连接 2)API密钥 3)模型ID"
-        )
-        
-        return None, "两个AI接口均失败", None, None, ""
+            self.manual_intervention_signal.emit(
+                "两个AI接口交叉重试均失败",
+                "请检查: 1)网络连接 2)API密钥 3)模型ID"
+            )
+            return None, "两个AI接口均失败", None, None, last_response_text
 
 
     def _call_and_process_single_api(self, api_call_func, img_str, prompt, q_config, api_name="API", max_retries=2, api_key: Optional[str] = None):
@@ -3178,7 +3286,6 @@ class GradingThread(QThread):
                     already_logged = error_info.get('already_logged', False) if isinstance(error_info, dict) else False
                     if not already_logged:
                         self.log_signal.emit(f"{api_name}检测到人工介入请求: {error_msg}", True, "ERROR")
-                    # 【关键修复】返回的错误消息包含"需人工介入"标记，便于上层识别
                     return None, None, None, None, response_text, f"需人工介入: {error_msg}"
 
                 # 检查是否为异常试卷信号，若是则不重试，返回特殊标记供上层处理
@@ -3268,9 +3375,6 @@ class GradingThread(QThread):
         }
 
         # 此版本暂时不启用置信度功能，今后如果需要再启用
-        # combined_confidence = {
-        #     'api1_confidence': confidence1,
-        #     'api2_confidence': confidence2
         # }
         combined_confidence = {} # 置信度功能暂时停用
 
@@ -3418,8 +3522,6 @@ class GradingThread(QThread):
             # =====================================================================
 
             # 【优先检查】AI是否明确请求人工介入（必须在"无法识别"检查之前，以保证人工介入信号优先级最高）
-            # 【关键修复】不再直接调用_stop_grading，而是返回人工介入标记让上层处理
-            # 这样可以让无人模式的自动给分逻辑有机会执行
             manual_msg = self._detect_manual_intervention_feedback(student_answer_summary, scoring_basis)
             if manual_msg:
                 # 构建用户友好的提示信息：优先使用AI的评分依据（更详细），其次使用答案摘要
@@ -3447,11 +3549,8 @@ class GradingThread(QThread):
                 all_zero = all(score == 0 for score in scores_list) if scores_list else True
 
                 if has_any_score and not all_zero:
-                    # 低置信：AI给了部分分，不强制判零/停阅，仅提示
-                    self.log_signal.emit(
-                        f"检测到空白作答提示但AI给分，已降级为提示：{blank_msg}",
-                        True, "WARNING"
-                    )
+                    # AI 已给出非零分项得分，以 AI 分数为准，空白检测结果不采纳
+                    pass
                 else:
                     blank_policy = self._get_grading_policy('blank_answer_policy', 'zero')
                     if blank_policy == 'zero':
@@ -3461,14 +3560,11 @@ class GradingThread(QThread):
                         student_answer_summary = student_answer_summary if student_answer_summary else '空白作答'
                         scoring_basis = self._build_zero_scoring_basis(blank_msg)
                     elif blank_policy == 'manual':
-                        # 【关键修复】不再直接调用_stop_grading，而是返回人工介入标记让上层处理
-                        # 这样可以让无人模式的自动给分逻辑有机会执行
                         display_text = student_answer_summary if student_answer_summary else ""
                         self.log_signal.emit(f"空白/无有效作答({blank_msg})需要人工处理", True, "WARNING")
                         return False, {'manual_intervention': True, 'message': f'空白/无有效作答: {blank_msg}', 'raw_feedback': display_text, 'already_logged': True}
                     else:  # anomaly
                         # 异常试卷仅允许通过OCR识别到固定标记触发，此处不允许AI判定异常
-                        # 【关键修复】不再直接调用_stop_grading，而是返回人工介入标记让上层处理
                         display_text = student_answer_summary if student_answer_summary else ""
                         self.log_signal.emit(
                             f"空白/无有效作答检测到异常卷策略，但已按人工介入处理（异常卷仅限固定标记触发）：{blank_msg}",
@@ -3486,8 +3582,6 @@ class GradingThread(QThread):
                 )
 
             # 检查是否为无法识别的情况
-            # 【关键修复】不再直接调用_stop_grading，而是返回人工介入标记让上层处理
-            # 这样可以让无人模式的自动给分逻辑有机会执行
             if self._is_unrecognizable_answer(student_answer_summary, itemized_scores_from_json, scoring_basis):
                 error_msg = f"学生答案图片无法识别。AI反馈: {student_answer_summary}"
                 self.log_signal.emit(error_msg, True, "ERROR")
@@ -3559,7 +3653,9 @@ class GradingThread(QThread):
                 api_label = " - AI 2"
             else:
                 api_label = " - AI 1"
-            header = f"【总分 {final_score} 分 - {mode_label}{api_label} - AI评分依据如下】"
+            import datetime as _dt
+            _score_time = _dt.datetime.now().strftime("%H:%M:%S")
+            header = f"【 总分 {final_score} 分 - {mode_label}{api_label} - {_score_time} 】"
             basis_text = scoring_basis.strip() if isinstance(scoring_basis, str) else str(scoring_basis)
             display_text = f"{header}\n{basis_text}" if basis_text else header
             self.log_signal.emit(display_text, False, "RESULT")
@@ -4100,6 +4196,7 @@ class GradingThread(QThread):
                     'sub_scores': str(itemized_scores_data) if itemized_scores_data is not None else "AI未提供",
                     'raw_ai_response': raw_ai_response if raw_ai_response is not None else "AI未提供",
                     'grade_model_id': used_model_id,
+                    'api_label': 'AI 2' if self.last_used_api == "second" else 'AI 1',
                 })
 
             else:

@@ -6,15 +6,19 @@ import traceback
 import datetime
 import pathlib
 import re
-from typing import Union, Optional, Type, TypeVar, cast, Tuple
+from typing import Optional, cast, Tuple
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QMessageBox, QDialog,
                              QComboBox, QLineEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
-                             QPlainTextEdit, QApplication, QShortcut, QLabel, QPushButton)
+                             QPlainTextEdit, QPushButton)
 from PyQt5.QtCore import Qt, pyqtSignal, QEvent, QObject, QTimer
-from PyQt5.QtGui import QKeySequence, QFont, QKeyEvent, QCloseEvent, QIcon
+from PyQt5.QtGui import QFont, QCloseEvent, QIcon, QTextCursor, QTextBlockFormat, QTextCharFormat, QColor
 from PyQt5 import uic
 
 # --- 新增导入 ---
+# 确保父目录在 sys.path 中，以便直接运行时也能找到 api_service
+_parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
 # 从 api_service.py 导入转换函数和UI文本列表生成函数
 from api_service import get_provider_id_from_ui_text, get_ui_text_from_provider_id, UI_TEXT_TO_PROVIDER_ID, PROVIDER_CONFIGS
 
@@ -29,6 +33,21 @@ class MainWindow(QMainWindow):
     progress_signal = pyqtSignal(int, int)
     finished_signal = pyqtSignal()
 
+    _WORK_MODE_UI_TO_ID = {
+        '识图直评': 'direct_grade',
+        '直评+推理': 'direct_grade_thinking',
+        '识评分离': 'ocr_then_grade',
+        '分离+推理': 'ocr_then_grade_thinking',
+        '分离+双推理': 'ocr_then_grade_dual_thinking',
+    }
+    _WORK_MODE_ID_TO_DISPLAY = {
+        'direct_grade': '一 识图直评',
+        'direct_grade_thinking': '二 直评+推理',
+        'ocr_then_grade': '三 识评分离',
+        'ocr_then_grade_thinking': '四 分离+单推理',
+        'ocr_then_grade_dual_thinking': '五 分离+双推理',
+    }
+
 
     def __init__(self, config_manager, api_service, worker):
         super().__init__()
@@ -37,7 +56,6 @@ class MainWindow(QMainWindow):
         self.worker = worker
         self._is_initializing = True
         self._pending_save = False
-        self._last_save_reason = ""
         self._autosave_timer: Optional[QTimer] = None
 
         # 加载UI文件
@@ -484,14 +502,7 @@ class MainWindow(QMainWindow):
                 work_mode = combo_box.currentData()
             if not work_mode:
                 normalized_text = self._normalize_work_mode_ui_text(ui_text)
-                mode_map = {
-                    '识图直评': 'direct_grade',
-                    '直评+推理': 'direct_grade_thinking',
-                    '识评分离': 'ocr_then_grade',
-                    '分离+推理': 'ocr_then_grade_thinking',
-                    '分离+双推理': 'ocr_then_grade_dual_thinking'
-                }
-                work_mode = mode_map.get(normalized_text, 'direct_grade')
+                work_mode = self._WORK_MODE_UI_TO_ID.get(normalized_text, 'direct_grade')
             field_name = f"question_{q_index}_work_mode"
             self.config_manager.update_config_in_memory(field_name, work_mode)
             label = self._display_name_for_field(str(field_name))
@@ -541,8 +552,6 @@ class MainWindow(QMainWindow):
         if self._is_initializing:
             return
         self._pending_save = True
-        if reason:
-            self._last_save_reason = reason
 
     def _flush_config_to_file(self, reason: str = "") -> bool:
         """将内存中的配置统一保存到文件。"""
@@ -555,8 +564,6 @@ class MainWindow(QMainWindow):
             ok = self.config_manager.save_all_configs_to_file()
             if ok:
                 self._pending_save = False
-                if reason:
-                    self._last_save_reason = reason
             return ok
         except Exception:
             return False
@@ -643,23 +650,20 @@ class MainWindow(QMainWindow):
         # UI文件历史上包含第8题Tab；此处确保运行时只保留7题
         self._trim_question_tabs_to_max()
 
-        self.setup_question_selector()
         # 将选中选项卡设置为高亮背景，便于视觉识别当前小题
         try:
             tab_widget = self.get_ui_element('questionTabs')
             if tab_widget:
                 try:
                     tabbar = tab_widget.tabBar()
-                    # 选中时黄色背景，未选中时白色，增加内边距让视觉更明显
                     tabbar.setStyleSheet(
                         "QTabBar::tab:selected { background: #FFF9C4; color: #0b3a5a; border:1px solid #FFE5B4; border-radius:4px; }"
-                        "QTabBar::tab { background: #ffffff; color: #333; padding:6px 12px; margin:2px; }"
+                        "QTabBar::tab { background: #ffffff; color: #333; padding:6px 0px; margin:2px; }"
                     )
                 except Exception:
                     pass
         except Exception:
             pass
-        # ... 其他 setup 方法 ...
         self.setup_text_fields()
         self.setup_dual_evaluation()
         self.setup_unattended_mode()
@@ -753,7 +757,7 @@ class MainWindow(QMainWindow):
             unattended_element = self.get_ui_element('unattended_mode_enabled', QCheckBox)
             if unattended_element and isinstance(unattended_element, QCheckBox):
                 unattended_element.setChecked(self.config_manager.unattended_mode_enabled)
-                unattended_element.setToolTip("启用后，AI评分失败时自动给保守分并标记待复核，系统不停机继续阅卷。\n• 标准模式：按填充率给分（<25%给0分，否则给步长最小分）\n• 三步打分：每步各给1分（共3分），便于快速定位回评\n禁用：遇到问题时立即停止，等待人工处理")
+                unattended_element.setToolTip("启用后实现真正的无人持续阅卷：\n• API限流/网络波动：自动等待15分钟后重试，最多10次，循环直到恢复\n• AI内容问题（字迹不清等）：按填充率自动给保守分并标记待复核\n  - 标准模式：<25%给0分，否则给步长最小分\n  - 三步打分：每步各给1分（共3分），便于快速定位回评\n• 无人模式与双评互斥：两者无法同时使用\n禁用：遇到问题立即停止，等待人工处理")
 
             # 加载题目配置
             for i in range(1, self.max_questions + 1):
@@ -789,14 +793,7 @@ class MainWindow(QMainWindow):
                     if index >= 0:
                         work_mode_combo.setCurrentIndex(index)
                     else:
-                        display_text_map = {
-                            'direct_grade': '一 识图直评',
-                            'direct_grade_thinking': '二 直评+推理',
-                            'ocr_then_grade': '三 识评分离',
-                            'ocr_then_grade_thinking': '四 分离+单推理',
-                            'ocr_then_grade_dual_thinking': '五 分离+双推理'
-                        }
-                        display_text = display_text_map.get(work_mode_value, '一 识图直评')
+                        display_text = self._WORK_MODE_ID_TO_DISPLAY.get(work_mode_value, '一 识图直评')
                         work_mode_combo.setCurrentText(display_text)
                 
 
@@ -917,7 +914,7 @@ class MainWindow(QMainWindow):
             if len(enabled_questions_indices) > 1 and dual_evaluation:
                 dual_evaluation = False
                 # 更新UI复选框状态，确保UI与实际行为一致
-                dual_eval_checkbox = self.get_ui_element('dualEvaluationCheckbox')
+                dual_eval_checkbox = self.get_ui_element('dual_evaluation_enabled')
                 if dual_eval_checkbox:
                     dual_eval_checkbox.setChecked(False)
                 self.log_message("多题模式下自动禁用双评功能", is_error=False)
@@ -928,7 +925,7 @@ class MainWindow(QMainWindow):
                     q_cfg = self.config_manager.get_question_config(q_idx)
                     if q_cfg.get('work_mode') in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'}:
                         dual_evaluation = False
-                        dual_eval_checkbox = self.get_ui_element('dualEvaluationCheckbox')
+                        dual_eval_checkbox = self.get_ui_element('dual_evaluation_enabled')
                         if dual_eval_checkbox:
                             dual_eval_checkbox.setChecked(False)
                         self.log_message("识评分离模式下自动禁用双评功能", is_error=False)
@@ -1188,14 +1185,7 @@ class MainWindow(QMainWindow):
                     mode_value = work_mode_combo.currentData()
                     if not mode_value:
                         normalized = self._normalize_work_mode_ui_text(work_mode_combo.currentText())
-                        fallback_map = {
-                            '识图直评': 'direct_grade',
-                            '直评+推理': 'direct_grade_thinking',
-                            '识评分离': 'ocr_then_grade',
-                            '分离+推理': 'ocr_then_grade_thinking',
-                            '分离+双推理': 'ocr_then_grade_dual_thinking'
-                        }
-                        mode_value = fallback_map.get(normalized, 'direct_grade')
+                        mode_value = self._WORK_MODE_UI_TO_ID.get(normalized, 'direct_grade')
                     if mode_value in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'}:
                         has_ocr_then_grade = True
                         break
@@ -1282,20 +1272,13 @@ class MainWindow(QMainWindow):
     def _sync_work_mode_from_ui(self) -> None:
         """将UI中的工作模式同步回配置内存，确保落盘一致。"""
         try:
-            mode_map = {
-                '识图直评': 'direct_grade',
-                '直评+推理': 'direct_grade_thinking',
-                '识评分离': 'ocr_then_grade',
-                '分离+推理': 'ocr_then_grade_thinking',
-                '分离+双推理': 'ocr_then_grade_dual_thinking'
-            }
             for i in range(1, self.max_questions + 1):
                 work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
                 if work_mode_combo and isinstance(work_mode_combo, QComboBox):
                     work_mode = work_mode_combo.currentData()
                     if not work_mode:
                         ui_text = self._normalize_work_mode_ui_text(work_mode_combo.currentText())
-                        work_mode = mode_map.get(ui_text, 'direct_grade')
+                        work_mode = self._WORK_MODE_UI_TO_ID.get(ui_text, 'direct_grade')
                     field_name = f'question_{i}_work_mode'
                     self.config_manager.update_config_in_memory(field_name, work_mode)
         except Exception:
@@ -1368,6 +1351,10 @@ class MainWindow(QMainWindow):
         if level_upper not in ["ERROR", "RESULT"] and not is_important:
             return
 
+        # 不向用户展示空白作答降级提示（内部处理细节）
+        if "检测到空白作答提示但AI给分" in str(message):
+            return
+
         # 统一做去噪
         message = self._normalize_log_text(str(message), preserve_newlines=(level_upper == "RESULT"))
         if not message:
@@ -1390,7 +1377,7 @@ class MainWindow(QMainWindow):
                 # 新格式：如果第一行是【总分 xx 分 - AI评分依据如下】，则将其作为标题
                 # 其余行作为正文，避免 UI 出现重复标题块。
                 first_line, sep, rest = message.partition("\n")
-                if first_line.strip().startswith("【总分") and first_line.strip().endswith("】"):
+                if first_line.strip().startswith("【") and first_line.strip().endswith("】"):
                     prefix = first_line.strip()
                     message = rest.strip() if sep else ""
             else:
@@ -1404,7 +1391,29 @@ class MainWindow(QMainWindow):
             formatted_message = formatted_message.replace("；", "；<br>")
             
             # AI评分依据另起一行显示，增加空行提高视觉舒适度
-            log_widget.append(f'<span style="color:{color}; font-size:14pt;">{prefix}<br>{formatted_message}</span><br>')
+            if level_upper == "RESULT" and prefix.startswith("【") and prefix.endswith("】"):
+                # 使用游标操作确保每条标题都能可靠居中（Qt QTextBrowser 的 append 不保证跨段落居中一致性）
+                cursor = log_widget.textCursor()
+                cursor.movePosition(QTextCursor.End)
+                # 居中标题段落
+                block_fmt_center = QTextBlockFormat()
+                block_fmt_center.setAlignment(Qt.AlignCenter)  # type: ignore[attr-defined]
+                block_fmt_center.setTopMargin(6)
+                block_fmt_center.setBottomMargin(0)
+                cursor.insertBlock(block_fmt_center)
+                cursor.insertHtml(f'<span style="font-size:14pt; font-weight:bold; color:{color};">{prefix}</span>')
+                # 内容段落（左对齐，紧跟标题，无额外间距）
+                if formatted_message:
+                    block_fmt_left = QTextBlockFormat()
+                    block_fmt_left.setAlignment(Qt.AlignLeft)  # type: ignore[attr-defined]
+                    block_fmt_left.setTopMargin(0)
+                    block_fmt_left.setBottomMargin(6)
+                    cursor.insertBlock(block_fmt_left)
+                    cursor.insertHtml(f'<span style="font-size:14pt; color:{color};">{formatted_message}</span>')
+                log_widget.setTextCursor(cursor)
+                log_widget.ensureCursorVisible()
+            else:
+                log_widget.append(f'<span style="color:{color}; font-size:14pt;">{prefix}<br>{formatted_message}</span><br>')
 
         # 控制台始终输出所有消息
         print(f"[{level_upper}] {message}")
@@ -1537,24 +1546,6 @@ class MainWindow(QMainWindow):
                 self.log_message(f"第{question_index}题答案框窗口已关闭，从字典中移除引用")
                 del self.answer_windows[question_index]
 
-    def _get_config_safe(self, section, option, default_value):
-        """安全地从配置管理器获取配置值"""
-        try:
-            if not self.config_manager.parser.has_section(section) or not self.config_manager.parser.has_option(section, option):
-                return default_value
-            return self.config_manager.parser.get(section, option)
-        except Exception:
-            return default_value
-    
-    def connect_signals(self):
-        """连接所有UI信号的公开接口"""
-        self._connect_signals()
-
-    def setup_question_selector(self):
-        pass  # UI文件已自动连接
-
-    def on_question_changed(self, button): pass
-
     def setup_text_fields(self):
         # 支持7道题
         for i in range(1, self.max_questions + 1):
@@ -1592,7 +1583,7 @@ class MainWindow(QMainWindow):
         
         # 提示用户无人模式的含义
         if is_enabled:
-            self.log_message("无人模式已启用：AI失败时自动给保守分并标记待复核（三步打分模式下每步各给1分，共3分）")
+            self.log_message("无人模式已启用：API限流/网络波动时自动等待15分钟重试（最多10次）；AI内容问题时按填充率自动给保守分。与双评互斥。")
         else:
             self.log_message("无人模式已禁用：遇到问题时将立即停止并等待人工处理")
 
