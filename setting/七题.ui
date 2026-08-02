@@ -463,7 +463,7 @@ QScrollBar::sub-line:horizontal {
              </sizepolicy>
             </property>
             <property name="text">
-             <string>分差内提交均分；外停止阅卷           </string>
+             <string>分差内提交均分；外停止阅卷                           </string>
             </property>
            </widget>
           </item>
@@ -652,12 +652,15 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <property name="minimumSize">
                  <size>
-                                 <width>150</width>
+                  <width>150</width>
                   <height>0</height>
                  </size>
                 </property>
-                             <property name="styleSheet">
-                    <string notr="true">QComboBox {
+                <property name="toolTip">
+                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
+                </property>
+                <property name="styleSheet">
+                 <string notr="true">QComboBox {
         letter-spacing: 2px;
         padding-left: 6px;
         padding-right: 6px;
@@ -665,33 +668,30 @@ QScrollBar::sub-line:horizontal {
     QComboBox QAbstractItemView {
         letter-spacing: 2px;
     }</string>
-                             </property>
-                <property name="toolTip">
-                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
                 </property>
                 <item>
                  <property name="text">
-                                 <string>一 识图直评</string>
+                  <string>一 识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>二 直评+推理</string>
+                  <string>二 直评+推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>三 识评分离</string>
+                  <string>三 识评分离</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>四 分离+单推理</string>
+                  <string>四 分离+单推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>五 分离+双推理</string>
+                  <string>五 分离+双推理</string>
                  </property>
                 </item>
                </widget>
@@ -831,12 +831,15 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <property name="minimumSize">
                  <size>
-                                 <width>150</width>
+                  <width>150</width>
                   <height>0</height>
                  </size>
                 </property>
-                             <property name="styleSheet">
-                    <string notr="true">QComboBox {
+                <property name="toolTip">
+                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
+                </property>
+                <property name="styleSheet">
+                 <string notr="true">QComboBox {
         letter-spacing: 2px;
         padding-left: 6px;
         padding-right: 6px;
@@ -844,33 +847,30 @@ QScrollBar::sub-line:horizontal {
     QComboBox QAbstractItemView {
         letter-spacing: 2px;
     }</string>
-                             </property>
-                <property name="toolTip">
-                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
                 </property>
                 <item>
                  <property name="text">
-                                 <string>一 识图直评</string>
+                  <string>一 识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>二 直评+推理</string>
+                  <string>二 直评+推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>三 识评分离</string>
+                  <string>三 识评分离</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>四 分离+单推理</string>
+                  <string>四 分离+单推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>五 分离+双推理</string>
+                  <string>五 分离+双推理</string>
                  </property>
                 </item>
                </widget>
@@ -984,12 +984,15 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <property name="minimumSize">
                  <size>
-                                 <width>150</width>
+                  <width>150</width>
                   <height>0</height>
                  </size>
                 </property>
-                             <property name="styleSheet">
-                    <string notr="true">QComboBox {
+                <property name="toolTip">
+                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
+                </property>
+                <property name="styleSheet">
+                 <string notr="true">QComboBox {
         letter-spacing: 2px;
         padding-left: 6px;
         padding-right: 6px;
@@ -997,33 +1000,30 @@ QScrollBar::sub-line:horizontal {
     QComboBox QAbstractItemView {
         letter-spacing: 2px;
     }</string>
-                             </property>
-                <property name="toolTip">
-                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
                 </property>
                 <item>
                  <property name="text">
-                                 <string>一 识图直评</string>
+                  <string>一 识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>二 直评+推理</string>
+                  <string>二 直评+推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>三 识评分离</string>
+                  <string>三 识评分离</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>四 分离+单推理</string>
+                  <string>四 分离+单推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>五 分离+双推理</string>
+                  <string>五 分离+双推理</string>
                  </property>
                 </item>
                </widget>
@@ -1137,7 +1137,7 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <property name="minimumSize">
                  <size>
-                                 <width>150</width>
+                  <width>150</width>
                   <height>0</height>
                  </size>
                 </property>
@@ -1146,27 +1146,27 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <item>
                  <property name="text">
-                                 <string>一 识图直评</string>
+                  <string>一 识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>二 直评+推理</string>
+                  <string>二 直评+推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>三 识评分离</string>
+                  <string>三 识评分离</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>四 分离+单推理</string>
+                  <string>四 分离+单推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>五 分离+双推理</string>
+                  <string>五 分离+双推理</string>
                  </property>
                 </item>
                </widget>
@@ -1280,7 +1280,7 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <property name="minimumSize">
                  <size>
-                                 <width>150</width>
+                  <width>150</width>
                   <height>0</height>
                  </size>
                 </property>
@@ -1289,27 +1289,27 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <item>
                  <property name="text">
-                                 <string>一 识图直评</string>
+                  <string>一 识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>二 直评+推理</string>
+                  <string>二 直评+推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>三 识评分离</string>
+                  <string>三 识评分离</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>四 分离+单推理</string>
+                  <string>四 分离+单推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>五 分离+双推理</string>
+                  <string>五 分离+双推理</string>
                  </property>
                 </item>
                </widget>
@@ -1423,7 +1423,7 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <property name="minimumSize">
                  <size>
-                                 <width>150</width>
+                  <width>150</width>
                   <height>0</height>
                  </size>
                 </property>
@@ -1432,27 +1432,27 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <item>
                  <property name="text">
-                                 <string>一 识图直评</string>
+                  <string>一 识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>二 直评+推理</string>
+                  <string>二 直评+推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>三 识评分离</string>
+                  <string>三 识评分离</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>四 分离+单推理</string>
+                  <string>四 分离+单推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>五 分离+双推理</string>
+                  <string>五 分离+双推理</string>
                  </property>
                 </item>
                </widget>
@@ -1566,7 +1566,7 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <property name="minimumSize">
                  <size>
-                                 <width>150</width>
+                  <width>150</width>
                   <height>0</height>
                  </size>
                 </property>
@@ -1575,27 +1575,27 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <item>
                  <property name="text">
-                                 <string>一 识图直评</string>
+                  <string>一 识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>二 直评+推理</string>
+                  <string>二 直评+推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>三 识评分离</string>
+                  <string>三 识评分离</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>四 分离+单推理</string>
+                  <string>四 分离+单推理</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                                 <string>五 分离+双推理</string>
+                  <string>五 分离+双推理</string>
                  </property>
                 </item>
                </widget>

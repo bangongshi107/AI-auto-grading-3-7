@@ -864,6 +864,10 @@ class GradingThread(QThread):
         self._current_cycle_img_strs = {}  # 本轮(本份卷子)各题已截取的答题区域图（question_index -> base64）
         self._last_paper_answer_images = {}  # 上一轮各题答题区域图（question_index -> base64），用于比对
 
+        # 人工介入锁存：一旦触发人工介入，立即停止并阻止后续重试。
+        self._manual_intervention_latched = False
+        self._manual_intervention_latch_message = ""
+
     def _get_common_system_message(self, include_evidence_bar: bool = True, source_desc: str = "图片内容") -> str:
         """
         返回通用的AI系统提示词。
@@ -1291,7 +1295,6 @@ class GradingThread(QThread):
 
         # 交叉重试策略：API1→API2→API1→API2，最多4次
         last_error = None
-        manual_intervention_error = None
         last_response_text = ""
         start_api = self.current_api
         other_start = api_configs[start_api]["other"]
@@ -1306,6 +1309,9 @@ class GradingThread(QThread):
             pass
 
         for attempt_idx, api_key in enumerate(api_sequence):
+            if self._manual_intervention_latched or not self.running:
+                return None, None, None, None, last_response_text, "线程已停止（人工介入或用户取消）"
+
             current_config = api_configs[api_key]
             api_func = current_config["func"]
             api_name = current_config["name"]
@@ -1337,25 +1343,26 @@ class GradingThread(QThread):
                 return score, reasoning, itemized_scores, confidence, response_text, None
 
             if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入", "需要人工介入"]):
-                manual_intervention_error = error
                 last_error = error
-                if attempt_idx == 0:
-                    # 先用另一组API重试一次，再弹窗，避免单次网络抖动误判
-                    self.log_signal.emit(f"{api_name}请求人工介入，尝试另一组API重试一次...", False, "WARNING")
-                    continue
-                else:
-                    # 已尝试过另一组API，立即通知用户处理
-                    self.log_signal.emit(f"{api_name}请求人工介入，立即通知用户处理", False, "WARNING")
-                    break
+                ai_reason = error
+                for prefix in ["需人工介入: ", "需人工介入：", "需要人工介入: ", "需要人工介入："]:
+                    if isinstance(ai_reason, str) and ai_reason.startswith(prefix):
+                        ai_reason = ai_reason[len(prefix):].strip()
+                        break
+                self.log_signal.emit(f"{api_name}请求人工介入，已首触发立即停止", False, "WARNING")
+                self._stop_grading(
+                    reason=StopReason.MANUAL_INTERVENTION,
+                    message=ai_reason,
+                    detail="",
+                    emit_signal=True,
+                    log_level="WARNING"
+                )
+                return None, None, None, None, last_response_text, error
 
             last_error = error
             self.log_signal.emit(f"{api_name}评分失败（第{attempt_idx + 1}/4次尝试）", False, "WARNING")
 
         # ── 4次交叉重试全部失败后的处理 ──
-
-        # 人工介入信号：立即停止，等待人工处理（不做任何自动重试/自动给分）
-        if manual_intervention_error:
-            return None, None, None, None, last_response_text, manual_intervention_error
 
         # 普通API故障（网络/限流/服务不可用）：立即停止，等待人工介入
         self._stop_grading(
@@ -1818,6 +1825,12 @@ class GradingThread(QThread):
         
         # 构建 interrupt_reason
         interrupt_reason = f"[{reason.user_friendly_name}] {message}" if message else reason.user_friendly_name
+
+        # 人工介入场景设置锁存，避免后续流程继续重试。
+        if reason == StopReason.MANUAL_INTERVENTION:
+            self._manual_intervention_latched = True
+            if message:
+                self._manual_intervention_latch_message = message
         
         # 确定日志级别（如果未指定，根据停止原因自动决定）
         if log_level == "ERROR":  # 使用默认值时，根据原因调整
@@ -2171,10 +2184,21 @@ class GradingThread(QThread):
             )
             return False
 
-        if len(eval_result) == 6:
-            score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response, error_info = eval_result
+        # 显式按元组长度解包，避免类型检查器将不可达分支推断为 Never。
+        if isinstance(eval_result, tuple) and len(eval_result) == 6:
+            score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response, error_info = cast(Tuple[object, object, object, object, object, object], eval_result)
+        elif isinstance(eval_result, tuple) and len(eval_result) == 5:
+            score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response = cast(Tuple[object, object, object, object, object], eval_result)
         else:
-            score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response = eval_result
+            self.log_signal.emit(f"题目{question_index} 评分返回格式异常: {type(eval_result)}", True, "ERROR")
+            self._set_error_state(
+                BusinessError(
+                    f"第 {question_index} 题评分返回格式异常",
+                    BusinessError.TYPE_API_RESPONSE,
+                    question_index=question_index
+                )
+            )
+            return False
 
         if score is None:
             # 【优化】检查是否是人工介入导致的停止，如果是则不再重复记录误导性的"评分失败"
@@ -2587,6 +2611,8 @@ class GradingThread(QThread):
         self.current_api = "first"  # 重置为从第一个API开始
         self.last_used_api = "first"
         self.last_used_ocr_api = "first"
+        self._manual_intervention_latched = False
+        self._manual_intervention_latch_message = ""
 
     def stop(self):
         """停止线程（用户手动停止）
@@ -2845,7 +2871,6 @@ class GradingThread(QThread):
         # 交叉重试策略：API1→API2→API1→API2，最多4次
         last_error = None
         last_response_text = ""
-        manual_intervention_error = None  # 记录人工介入错误，用于最终处理
         start_api = self.current_api
 
         # 构建交叉序列：从当前API开始交替
@@ -2853,6 +2878,9 @@ class GradingThread(QThread):
         api_sequence = [start_api, other_start, start_api, other_start]
 
         for attempt_idx, api_key in enumerate(api_sequence):
+            if self._manual_intervention_latched or not self.running:
+                return None, "线程已停止（人工介入或用户取消）", None, None, last_response_text
+
             current_config = api_configs[api_key]
             api_func = current_config["func"]
             api_name = current_config["name"]
@@ -2874,22 +2902,9 @@ class GradingThread(QThread):
 
             # 第2次及以后的重试，先短暂等待（交叉切换天然提供冷却）
             if attempt_idx > 0:
-                # 人工介入场景：可能是截图问题，等待更长时间并重新截图
-                if manual_intervention_error and self._current_answer_area_data:
-                    self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 等待2秒后重新截图...", False, "WARNING")
-                    time.sleep(2.0)
-                    try:
-                        new_img_str = self._capture_question_area(self._current_answer_area_data)
-                        if new_img_str:
-                            img_str = new_img_str
-                            self.log_signal.emit("已重新截图", False, "INFO")
-                            manual_intervention_error = None  # 重置，用新图再试
-                    except Exception as e:
-                        self.log_signal.emit(f"重新截图失败: {e}", False, "WARNING")
-                else:
-                    # 普通失败：短暂等待1秒后切换API重试
-                    self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 切换到{api_name}重试...", False, "INFO")
-                    time.sleep(1.0)
+                # 普通失败：短暂等待1秒后切换API重试
+                self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 切换到{api_name}重试...", False, "INFO")
+                time.sleep(1.0)
 
             self.log_signal.emit(f"使用{api_name}进行评分...", False, "INFO")
             self.current_api = api_key
@@ -2923,38 +2938,29 @@ class GradingThread(QThread):
                 self.log_signal.emit(f"下一张将使用 {api_configs[other_api]['name']} 评分（交替策略）", False, "DETAIL")
                 return score, reasoning, scores, confidence, response_text
 
-            # 人工介入信号：先用另一组API重试一次再弹窗，避免单次网络抖动误判
+            # 人工介入信号：首触发即停（锁存），不再继续交叉重试
             if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入", "需要人工介入"]):
-                manual_intervention_error = error
                 last_error = error
-                if attempt_idx == 0:
-                    self.log_signal.emit(f"{api_name}请求人工介入，尝试另一组API重试一次...", False, "WARNING")
-                    continue
-                else:
-                    self.log_signal.emit(f"{api_name}请求人工介入，立即通知用户处理", False, "WARNING")
-                    break
+                ai_reason = error
+                for prefix in ["需人工介入: ", "需人工介入：", "需要人工介入: ", "需要人工介入："]:
+                    if isinstance(ai_reason, str) and ai_reason.startswith(prefix):
+                        ai_reason = ai_reason[len(prefix):].strip()
+                        break
+                self.log_signal.emit(f"{api_name}请求人工介入，已首触发立即停止", False, "WARNING")
+                self._stop_grading(
+                    reason=StopReason.MANUAL_INTERVENTION,
+                    message=ai_reason,
+                    detail="",
+                    emit_signal=True,
+                    log_level="WARNING"
+                )
+                return None, error, None, None, last_response_text
 
             # 普通失败：记录错误，继续交叉重试
             last_error = error
             self.log_signal.emit(f"{api_name}失败（第{attempt_idx + 1}/4次尝试）", False, "WARNING")
 
         # ── 4次交叉重试全部失败后的处理 ──
-
-        # 如果最后的错误是人工介入，立即停止并通知（不做任何自动重试/自动给分）
-        if manual_intervention_error:
-            ai_reason = manual_intervention_error
-            for prefix in ["需人工介入: ", "需人工介入：", "需要人工介入: ", "需要人工介入："]:
-                if isinstance(ai_reason, str) and ai_reason.startswith(prefix):
-                    ai_reason = ai_reason[len(prefix):].strip()
-                    break
-            self._stop_grading(
-                reason=StopReason.MANUAL_INTERVENTION,
-                message=ai_reason,
-                detail="",
-                emit_signal=True,
-                log_level="WARNING"
-            )
-            return None, manual_intervention_error, None, None, last_response_text
 
         # 普通API故障（网络/限流/服务不可用）：立即停止，等待人工介入
         self._stop_grading(
