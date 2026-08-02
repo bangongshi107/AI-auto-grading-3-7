@@ -53,9 +53,6 @@ class ConfigManager:
         self.dual_evaluation_enabled = False
         self.score_diff_threshold = 5
         
-        # 无人模式配置（简化版：仅保留开关，移除重试延迟和轮数配置）
-        self.unattended_mode_enabled = False  # 无人模式开关
-        
         self.subject = ""
         self.cycle_number = 1
         self.wait_time = 1.5  # 等待时间（支持小数，默认1.5秒）
@@ -64,9 +61,8 @@ class ConfigManager:
 
         # 阅卷判定策略（空白/乱码等如何处理）
         # 可选值：
-        # - zero: 直接判0分并继续（不算异常卷/不触发人工介入）
+        # - zero: 直接判0分并继续（不算需人工介入）
         # - manual: 停止并提示人工介入
-        # - anomaly: 走“异常试卷”流程（如启用异常卷按钮则自动点击跳过，否则人工介入）
         self.blank_answer_policy = "zero"
         self.gibberish_answer_policy = "manual"
         
@@ -83,8 +79,6 @@ class ConfigManager:
                 'max_score': 100,
                 'enable_next_button': False,
                 'next_button_pos': None,
-                'enable_anomaly_button': False,  # 异常卷按钮开关
-                'anomaly_button_pos': None,  # 异常卷按钮位置
                 'question_type': 'Subjective_PointBased_QA',
                 'work_mode': 'direct_grade',  # 识图直评 / 直评+推理 / 识评分离 / 分离+推理 / 分离+双推理
                 'score_rounding_step': 0.5,  # 每题独立步长，默认0.5
@@ -137,9 +131,6 @@ class ConfigManager:
         self.dual_evaluation_enabled = self._get_config_safe('DualEvaluation', 'enabled', False, bool)
         self.score_diff_threshold = self._get_config_safe('DualEvaluation', 'score_diff_threshold', 5, int)
         
-        # 加载无人模式配置（简化版）
-        self.unattended_mode_enabled = self._get_config_safe('UnattendedMode', 'enabled', False, bool)
-        
         self.subject = self._get_config_safe('UI', 'subject', "")
         self.cycle_number = self._get_config_safe('Auto', 'cycle_number', 1, int)
         self.wait_time = float(self._get_config_safe('Auto', 'wait_time', '1.5'))
@@ -172,8 +163,6 @@ class ConfigManager:
                 'max_score': self._get_config_safe(section_name, 'max_score', 100, int),
                 'enable_next_button': self._get_config_safe(section_name, 'enable_next_button', False, bool),
                 'next_button_pos': self._parse_position(self._get_config_safe(section_name, 'next_button_pos', None)),
-                'enable_anomaly_button': self._get_config_safe(section_name, 'enable_anomaly_button', False, bool),
-                'anomaly_button_pos': self._parse_position(self._get_config_safe(section_name, 'anomaly_button_pos', None)),
                 'question_type': self._get_config_safe(section_name, 'question_type', 'Subjective_PointBased_QA', str),
                 'work_mode': self._normalize_work_mode(
                     self._get_config_safe(section_name, 'work_mode', 'direct_grade', str)
@@ -303,7 +292,6 @@ class ConfigManager:
         elif field_name == 'api_reset_interval': self.api_reset_interval = max(0, int(value)) if value else 30
         elif field_name == 'dual_evaluation_enabled': self.dual_evaluation_enabled = bool(value)
         elif field_name == 'score_diff_threshold': self.score_diff_threshold = max(1, int(value)) if value else 5
-        elif field_name == 'unattended_mode_enabled': self.unattended_mode_enabled = bool(value)
         elif field_name == 'score_rounding_step':
             try:
                 self.score_rounding_step = float(value) if value is not None else 0.5
@@ -331,8 +319,6 @@ class ConfigManager:
         elif field_type == 'max_score': self.question_configs[q_index]['max_score'] = int(value) if value is not None else 100
         elif field_type == 'enable_next_button': self.question_configs[q_index]['enable_next_button'] = bool(value)
         elif field_type == 'next_button_pos': self.question_configs[q_index]['next_button_pos'] = value
-        elif field_type == 'enable_anomaly_button': self.question_configs[q_index]['enable_anomaly_button'] = bool(value)
-        elif field_type == 'anomaly_button_pos': self.question_configs[q_index]['anomaly_button_pos'] = value
         elif field_type == 'question_type': self.question_configs[q_index]['question_type'] = str(value) if value else 'Subjective_PointBased_QA'
         elif field_type == 'work_mode': self.question_configs[q_index]['work_mode'] = str(value) if value else 'direct_grade'
         elif field_type == 'score_rounding_step':  # 每题独立步长
@@ -373,9 +359,6 @@ class ConfigManager:
                 'api_reset_interval': str(self.api_reset_interval)
             }
             config['DualEvaluation'] = {'enabled': str(self.dual_evaluation_enabled), 'score_diff_threshold': str(self.score_diff_threshold)}
-            config['UnattendedMode'] = {
-                'enabled': str(self.unattended_mode_enabled)
-            }
             config['Settings'] = {
                 'score_rounding_step': str(self.score_rounding_step),
             }
@@ -403,14 +386,12 @@ class ConfigManager:
                     'min_score': str(q_config['min_score']),
                     'max_score': str(q_config['max_score']),
                     'enable_next_button': str(q_config['enable_next_button']),
-                    'enable_anomaly_button': str(q_config.get('enable_anomaly_button', False)),
                     'question_type': q_config.get('question_type', 'Subjective_PointBased_QA'),
                     'work_mode': q_config.get('work_mode', 'direct_grade'),
                     'score_rounding_step': str(q_config.get('score_rounding_step', 0.5)),
                     'score_input': f"{q_config['score_input_pos'][0]},{q_config['score_input_pos'][1]}" if q_config['score_input_pos'] else "",
                     'confirm_button': f"{q_config['confirm_button_pos'][0]},{q_config['confirm_button_pos'][1]}" if q_config['confirm_button_pos'] else "",
                     'next_button_pos': f"{q_config['next_button_pos'][0]},{q_config['next_button_pos'][1]}" if q_config['next_button_pos'] else "",
-                    'anomaly_button_pos': f"{q_config['anomaly_button_pos'][0]},{q_config['anomaly_button_pos'][1]}" if q_config.get('anomaly_button_pos') else "",
                     'answer_area': f"{q_config['answer_area']['x1']},{q_config['answer_area']['y1']},{q_config['answer_area']['x2']},{q_config['answer_area']['y2']}" if q_config['answer_area'] else "",
                 }
                 

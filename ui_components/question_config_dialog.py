@@ -627,49 +627,6 @@ class QuestionConfigDialog(QDialog):
         
         self.toggle_next_button_fields(self.enable_next_check.isChecked()) 
         
-        # --- 5.5. 异常卷按钮配置 ---
-        anomaly_group = QWidget()
-        anomaly_group_main_layout = QVBoxLayout()
-        self._compact_layout(anomaly_group_main_layout)
-        
-        # 启用异常卷按钮复选框
-        self.enable_anomaly_check = QCheckBox("启用异常卷按钮（否则阅卷停止 人工介入）")
-        enable_anomaly_for_current_q = self.question_config.get('enable_anomaly_button', False) if self.question_config else False
-        self.enable_anomaly_check.setChecked(enable_anomaly_for_current_q)
-        self.enable_anomaly_check.stateChanged.connect(self.toggle_anomaly_fields)
-        anomaly_group_main_layout.addWidget(self.enable_anomaly_check)
-        
-        # 异常卷按钮坐标设置
-        anomaly_coord_layout = QHBoxLayout()
-        self._compact_layout(anomaly_coord_layout)
-        anomaly_coord_layout.addWidget(QLabel("坐标:"))
-        anomaly_coord_layout.addWidget(QLabel("X:"))
-        self.anomaly_x_edit = QLineEdit()
-        anomaly_pos_val = self.question_config.get('anomaly_button_pos') if self.question_config else None
-        anomaly_x, anomaly_y = anomaly_pos_val if anomaly_pos_val is not None else (0, 0)
-        self.anomaly_x_edit.setText(str(anomaly_x))
-        self.anomaly_x_edit.setReadOnly(True)
-        self.anomaly_x_edit.setStyleSheet("background-color: #F2F7FF; color: #5E6F80; border: 1px dashed #AFCBFF; border-radius: 4px; padding: 4px 6px;")
-        anomaly_coord_layout.addWidget(self.anomaly_x_edit)
-        
-        anomaly_coord_layout.addWidget(QLabel("Y:"))
-        self.anomaly_y_edit = QLineEdit()
-        self.anomaly_y_edit.setText(str(anomaly_y))
-        self.anomaly_y_edit.setReadOnly(True)
-        self.anomaly_y_edit.setStyleSheet("background-color: #F2F7FF; color: #5E6F80; border: 1px dashed #AFCBFF; border-radius: 4px; padding: 4px 6px;")
-        anomaly_coord_layout.addWidget(self.anomaly_y_edit)
-        
-        self.set_anomaly_button = QPushButton("设置异常卷按钮位置")
-        self.set_anomaly_button.clicked.connect(lambda: self.set_position('anomaly_x_edit', 'anomaly_y_edit', "异常卷按钮"))
-        anomaly_coord_layout.addWidget(self.set_anomaly_button)
-        
-        anomaly_group_main_layout.addLayout(anomaly_coord_layout)
-        anomaly_group.setLayout(anomaly_group_main_layout)
-        main_layout.addWidget(anomaly_group)
-        
-        # 根据启用状态切换异常卷按钮相关字段的启用状态
-        self.toggle_anomaly_fields(self.enable_anomaly_check.isChecked())
-        
         # --- 6. 答案区域配置 (恢复到旧版对称布局) ---
         answer_group = QWidget() # 确保 answer_group 已定义
         answer_group_main_layout = QVBoxLayout()
@@ -835,12 +792,6 @@ class QuestionConfigDialog(QDialog):
         self.next_x_edit.setEnabled(checked)
         self.next_y_edit.setEnabled(checked)
         self.set_next_button.setEnabled(checked)
-
-    def toggle_anomaly_fields(self, checked):
-        """切换异常卷按钮字段的启用状态"""
-        self.anomaly_x_edit.setEnabled(checked)
-        self.anomaly_y_edit.setEnabled(checked)
-        self.set_anomaly_button.setEnabled(checked)
 
     def start_answer_area_selection(self):
         """开始框定答案区域"""
@@ -1055,22 +1006,6 @@ class QuestionConfigDialog(QDialog):
                     self._log_message(f"警告: 第{self.question_index}题的翻页按钮坐标无效，未保存。", is_error=True)
             elif self.config_manager:
                 self.config_manager.update_question_config(str(self.question_index), 'next_button_pos', None)
-
-            # --- 更新当前小题的异常卷按钮配置 ---
-            enable_anomaly_for_current_q = self.enable_anomaly_check.isChecked()
-            if self.config_manager:
-                self.config_manager.update_question_config(str(self.question_index), 'enable_anomaly_button', enable_anomaly_for_current_q)
-
-            if enable_anomaly_for_current_q and self.config_manager:
-                try:
-                    anomaly_x = int(self.anomaly_x_edit.text())
-                    anomaly_y = int(self.anomaly_y_edit.text())
-                    self.config_manager.update_question_config(str(self.question_index), 'anomaly_button_pos', (anomaly_x, anomaly_y))
-                except ValueError:
-                    self.config_manager.update_question_config(str(self.question_index), 'anomaly_button_pos', None)
-                    self._log_message(f"警告: 第{self.question_index}题的异常卷按钮坐标无效，未保存。", is_error=True)
-            elif self.config_manager:
-                self.config_manager.update_question_config(str(self.question_index), 'anomaly_button_pos', None)
 
             # --- 开始保存三步打分相关配置 (仅第一题) ---
             if self.question_index == 1 and self.three_step_scoring_checkbox and self.config_manager:  # 确保复选框和config_manager已创建

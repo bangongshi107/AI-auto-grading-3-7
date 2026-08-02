@@ -1,5 +1,5 @@
 # api_service.py - AI评分API服务模块
-# 支持多平台：火山引擎、阿里通义、百度千帆、腾讯混元、智谱、月之暗面、OpenRouter、OpenAI、Google Gemini
+# 支持多平台：火山引擎、阿里通义、百度千帆、DeepSeek、智谱、月之暗面、OpenRouter、OpenAI、Google Gemini
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -7,12 +7,10 @@ from urllib3.util.retry import Retry
 import logging
 import traceback
 from typing import Tuple, Optional, Dict, Any
-import hashlib
-import hmac
 import time
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from threading import Lock, local
 
 # ==============================================================================
@@ -32,14 +30,6 @@ def generate_ui_text_to_provider_id():
 # ==============================================================================
 #  权威供应商配置字典 (Authoritative Provider Configuration)
 #  这是整个系统的"单一事实来源 (Single Source of Truth)"。
-#
-#  腾讯混元更新历史 (Tencent Hunyuan Update History):
-#  - 2025-09-13: 重大更新 - 统一使用 ChatCompletions 接口
-#    * 替换 ImageQuestion 为 ChatCompletions action (无频率限制)
-#    * 实现腾讯云签名方法 v3 完整认证
-#    * 支持所有视觉模型自动适配 (hunyuan-vision, hunyuan-turbos-vision 等)
-#    * 智能检测视觉模型并自动选择正确的 payload 格式
-#    * API Key 格式: SecretId:SecretKey
 # ==============================================================================
 PROVIDER_CONFIGS = {
     # 这里的 key ('volcengine', 'moonshot'等) 是程序内部使用的【内部标识】
@@ -61,12 +51,12 @@ PROVIDER_CONFIGS = {
         "auth_method": "bearer", # 智谱的Key虽然是JWT，但用法和Bearer完全一样
         "payload_builder": "_build_openai_compatible_payload",
     },
-    # "deepseek": {
-    #     "name": "deepseek",
-    #     "url": "https://api.deepseek.com/chat/completions",
-    #     "auth_method": "bearer",
-    #     "payload_builder": "_build_openai_compatible_payload",
-    # },
+    "deepseek": {
+        "name": "DeepSeek",
+        "url": "https://api.deepseek.com/chat/completions",
+        "auth_method": "bearer",
+        "payload_builder": "_build_openai_compatible_payload",
+    },
     "aliyun": {
         "name": "阿里通义千问",
         "url": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
@@ -78,19 +68,6 @@ PROVIDER_CONFIGS = {
         "url": "https://qianfan.baidubce.com/v2/chat/completions",
         "auth_method": "bearer",
         "payload_builder": "_build_openai_compatible_payload",
-    },
-    "tencent": {
-        "name": "腾讯混元",
-        "url": "https://hunyuan.tencentcloudapi.com/",
-        "auth_method": "tencent_signature_v3", # 使用腾讯云签名方法 v3
-        "payload_builder": "_build_tencent_payload",
-        "service_info": {  # 新增服务信息配置，避免硬编码
-            "service": "hunyuan",
-            "region": "ap-guangzhou",
-            "version": "2023-09-01",
-            "host": "hunyuan.tencentcloudapi.com",
-            "action": "ChatCompletions"
-        }
     },
     "openrouter": {
         "name": "OpenRouter",
@@ -229,81 +206,6 @@ class ApiService:
         
         self._thread_local = local()  # 创建全新的线程本地存储
         self.current_question_index = 1
-
-    # ==========================================================================
-    #  腾讯云签名方法 v3 实现 (Tencent Cloud Signature Method v3)
-    #
-    #  更新历史 (Update History):
-    #  - 2025-09-13: 首次实现完整的 TC3-HMAC-SHA256 签名流程
-    #    * 实现规范请求字符串构建
-    #    * 实现 HMAC-SHA256 多层签名计算
-    #    * 支持动态时间戳和凭证范围
-    #    * 自动生成 Authorization header
-    #
-    #  技术要点 (Technical Notes):
-    #  - 使用 UTC 时间戳确保时区一致性
-    #  - 签名顺序: SecretKey -> Date -> Service -> "tc3_request"
-    #  - 支持的 Service: "hunyuan"
-    #  - 支持的 Region: "ap-guangzhou" (默认)
-    # ==========================================================================
-    def _build_tencent_signature_v3(self, secret_id: str, secret_key: str, service: str, region: str,
-                                   action: str, version: str, payload: str, host: str) -> Tuple[str, str]:
-        """构建腾讯云 API 签名方法 v3
-
-        Args:
-            secret_id: 腾讯云 SecretId
-            secret_key: 腾讯云 SecretKey
-            service: 服务名称 (hunyuan)
-            region: 地域 (ap-guangzhou)
-            action: API 动作 (ChatCompletions)
-            version: API 版本 (2023-09-01)
-            payload: 请求 payload 的 JSON 字符串
-
-        Returns:
-            Tuple[str, str]: (authorization_header, timestamp)
-        """
-
-        # 1. 创建规范请求字符串
-        algorithm = "TC3-HMAC-SHA256"
-        timestamp = int(time.time())
-        date = datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime('%Y-%m-%d')  # 腾讯云签名要求 YYYY-MM-DD 格式
-
-        # 规范请求
-        canonical_request = self._build_canonical_request(action, payload, host)
-
-        # 2. 创建待签字符串
-        credential_scope = f"{date}/{service}/tc3_request"
-        string_to_sign = f"{algorithm}\n{timestamp}\n{credential_scope}\n{hashlib.sha256(canonical_request.encode('utf-8')).hexdigest()}"
-
-        # 3. 计算签名
-        secret_date = hmac.new(f"TC3{secret_key}".encode('utf-8'), date.encode('utf-8'), hashlib.sha256).digest()
-        secret_service = hmac.new(secret_date, service.encode('utf-8'), hashlib.sha256).digest()
-        secret_signing = hmac.new(secret_service, "tc3_request".encode('utf-8'), hashlib.sha256).digest()
-        signature = hmac.new(secret_signing, string_to_sign.encode('utf-8'), hashlib.sha256).hexdigest()
-
-        # 4. 构建 Authorization
-        authorization = f"{algorithm} Credential={secret_id}/{credential_scope}, SignedHeaders=content-type;host, Signature={signature}"
-
-        return authorization, str(timestamp)
-
-    def _build_canonical_request(self, action: str, payload: str, host: str) -> str:
-        """构建规范请求字符串"""
-        # HTTP 请求方法
-        http_request_method = "POST"
-        # 规范 URI
-        canonical_uri = "/"
-        # 规范查询字符串
-        canonical_querystring = ""
-        # 规范头部
-        canonical_headers = f"content-type:application/json\nhost:{host}\n"
-        # 签名的头部列表
-        signed_headers = "content-type;host"
-        # 请求载荷的哈希值
-        hashed_request_payload = hashlib.sha256(payload.encode('utf-8')).hexdigest()
-
-        canonical_request = f"{http_request_method}\n{canonical_uri}\n{canonical_querystring}\n{canonical_headers}\n{signed_headers}\n{hashed_request_payload}"
-
-        return canonical_request
 
     # 新增: 设置当前题目索引的方法
     def set_current_question(self, index: int):
@@ -448,34 +350,6 @@ class ApiService:
                 api_key = api_key[7:].strip()  # 移除"Bearer "前缀
             return api_key, None
 
-        elif auth_method == "tencent_signature_v3":
-            # 处理腾讯API Key格式
-            # 支持中文冒号自动转换
-            api_key = api_key.replace("：", ":")  # 中文冒号转英文冒号
-
-            # 检查冒号数量
-            colon_count = api_key.count(":")
-            if colon_count == 0:
-                return "", "腾讯API Key格式错误：缺少冒号分隔符，应为 'SecretId:SecretKey' 格式"
-            elif colon_count > 1:
-                return "", "腾讯API Key格式错误：冒号数量过多，应为 'SecretId:SecretKey' 格式"
-
-            # 分离SecretId和SecretKey
-            parts = api_key.split(":", 1)
-            secret_id, secret_key = parts[0].strip(), parts[1].strip()
-
-            # 验证格式合理性
-            if not secret_id:
-                return "", "腾讯API Key格式错误：SecretId不能为空"
-            if not secret_key:
-                return "", "腾讯API Key格式错误：SecretKey不能为空"
-            if len(secret_id) < 10:
-                return "", "腾讯API Key格式错误：SecretId长度过短"
-            if len(secret_key) < 10:
-                return "", "腾讯API Key格式错误：SecretKey长度过短"
-
-            return f"{secret_id}:{secret_key}", None
-
         elif auth_method == "google_api_key_in_url":
             # Google Gemini API Key - 直接使用，无特殊格式要求
             # API Key会被添加到URL参数中，不需要特殊处理
@@ -508,7 +382,7 @@ class ApiService:
         if key_error:
             return None, key_error
 
-        # 先构建 payload，因为腾讯签名需要用到它
+        # 先构建 payload
         try:
             builder_func = getattr(self, config["payload_builder"])
             payload = builder_func(model_id, img_str, prompt)
@@ -520,27 +394,6 @@ class ApiService:
             headers["Authorization"] = f"Bearer {processed_key}"
         elif auth_method == "google_api_key_in_url": # For Gemini
              url += f"?key={processed_key}"
-        elif auth_method == "tencent_signature_v3":
-            # 腾讯云签名方法 v3 - 使用预处理后的Key
-            secret_id, secret_key = processed_key.split(":", 1)
-            payload_str = json.dumps(payload, separators=(',', ':'))
-
-            # 从配置中读取服务信息，避免硬编码
-            service_info = config.get("service_info", {})
-            service = service_info.get("service", "hunyuan")
-            region = service_info.get("region", "ap-guangzhou")
-            version = service_info.get("version", "2023-09-01")
-            action = service_info.get("action", "ChatCompletions")
-
-            host = service_info.get("host", "hunyuan.tencentcloudapi.com")
-            authorization, timestamp = self._build_tencent_signature_v3(
-                secret_id, secret_key, service, region, action, version, payload_str, host
-            )
-            headers["Authorization"] = authorization
-            headers["X-TC-Timestamp"] = timestamp
-            headers["X-TC-Version"] = version
-            headers["X-TC-Action"] = action
-            headers["X-TC-Region"] = region
 
         # 通用请求发送逻辑（所有认证方式共享）
         try:
@@ -594,17 +447,12 @@ class ApiService:
         """从API响应中提取内容
         
         支持的提供商响应格式：
-        - OpenAI兼容格式: openai, moonshot, openrouter, zhipu, volcengine, aliyun, baidu
-        - 腾讯混元格式: tencent
+        - OpenAI兼容格式: openai, moonshot, openrouter, zhipu, volcengine, aliyun, baidu, deepseek
         - Google Gemini格式: gemini
         """
         try:
             # OpenAI兼容格式 - 标准的 choices[0].message.content
-            if provider in ["openai", "moonshot", "openrouter", "zhipu", "volcengine", "aliyun", "baidu"]:
-                return data["choices"][0]["message"]["content"]
-            
-            # 腾讯混元 - 使用相同的OpenAI兼容格式
-            if provider == "tencent":
+            if provider in ["openai", "moonshot", "openrouter", "zhipu", "volcengine", "aliyun", "baidu", "deepseek"]:
                 return data["choices"][0]["message"]["content"]
             
             # Google Gemini - 特殊格式
@@ -739,73 +587,6 @@ class ApiService:
         }
 
 
-
-
-
-    def _build_tencent_payload(self, model_id, img_str, prompt):
-        """专为腾讯混元定制 - 支持所有视觉模型
-
-        更新历史 (Update History):
-        - 2025-09-13: 重构 payload 构建逻辑
-          * 统一使用 ChatCompletions 接口格式
-          * 实现智能视觉模型检测
-          * 支持动态模型名称输入
-          * 自动选择 Contents vs Content 格式
-
-        支持的视觉模型包括：
-        - hunyuan-vision (基础多模态)
-        - hunyuan-turbos-vision (旗舰模型)
-        - hunyuan-turbos-vision-20250619 (最新旗舰)
-        - hunyuan-t1-vision (深度思考)
-        - hunyuan-t1-vision-20250619 (最新深度思考)
-        - hunyuan-large-vision (多语言支持)
-
-        未来维护注意事项 (Future Maintenance Notes):
-        - 如果新模型名称不含 "vision"，需要更新检测逻辑
-        - 如果腾讯改变 payload 格式，需要相应调整
-        - 支持的图像格式：JPEG (base64编码)
-        - 图像URL格式：data:image/jpeg;base64,{base64_data}
-
-        Args:
-            model_id: 模型名称，由用户界面输入
-            img_str: 图像base64字符串（可选）
-            prompt: 文本提示
-
-        Returns:
-            dict: 符合腾讯API格式的请求payload
-        """
-        system_text = ""
-        user_text = ""
-        if isinstance(prompt, dict):
-            system_text = str(prompt.get("system", "") or "")
-            user_text = str(prompt.get("user", "") or "")
-        else:
-            user_text = str(prompt)
-
-        # 腾讯所有视觉模型都支持图像输入，通过模型名中的 "vision" 标识
-        is_vision_model = "vision" in model_id.lower()
-
-        if not img_str or not is_vision_model:
-            # 纯文本模式或非视觉模型
-            messages = []
-            if system_text.strip():
-                messages.append({"Role": "system", "Content": system_text})
-            messages.append({"Role": "user", "Content": user_text})
-            return {"Model": model_id, "Messages": messages, "Stream": False}
-
-        # 视觉模型支持图像输入
-        pure_base64 = self._get_pure_base64(img_str)
-        messages = []
-        if system_text.strip():
-            messages.append({"Role": "system", "Content": system_text})
-        messages.append({
-            "Role": "user",
-            "Contents": [
-                {"Type": "text", "Text": user_text},
-                {"Type": "image_url", "ImageUrl": {"Url": f"data:image/jpeg;base64,{pure_base64}"}}
-            ]
-        })
-        return {"Model": model_id, "Messages": messages, "Stream": False}
 
 
 

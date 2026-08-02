@@ -131,7 +131,6 @@ class MainWindow(QMainWindow):
             "subject": "学科",
             "cycle_number": "循环次数",
             "wait_time": "间隔时间(秒)",
-            "unattended_mode_enabled": "无人模式",
         }
         if f in mapping:
             return mapping[f]
@@ -228,13 +227,7 @@ class MainWindow(QMainWindow):
             reason_part = f"（{reason}）" if reason else ""
             head = f"题目{q}：" if q else ""
 
-            # 是否提示“启用异常卷按钮”
-            need_button_tip = any(k in cleaned_for_parse for k in ["未启用异常卷按钮", "未配置坐标"])
-            tip = "可选：在题目配置里启用“异常卷按钮”，下次可自动跳过。" if need_button_tip else ""
-
             summary = f"{head}检测到异常试卷{reason_part}。已暂停，请人工处理后继续。"
-            if tip:
-                summary += f"\n{tip}"
             return summary, detail
 
         if any(k in cleaned_for_parse for k in ["需人工介入", "需要人工介入", "人工介入"]):
@@ -666,7 +659,6 @@ class MainWindow(QMainWindow):
             pass
         self.setup_text_fields()
         self.setup_dual_evaluation()
-        self.setup_unattended_mode()
 
         # 初始化每题工作模式下拉框
         for i in range(1, self.max_questions + 1):
@@ -752,12 +744,6 @@ class MainWindow(QMainWindow):
             threshold_element = self.get_ui_element('score_diff_threshold')
             if threshold_element and isinstance(threshold_element, QSpinBox):
                 threshold_element.setValue(self.config_manager.score_diff_threshold)
-
-            # 加载无人模式配置
-            unattended_element = self.get_ui_element('unattended_mode_enabled', QCheckBox)
-            if unattended_element and isinstance(unattended_element, QCheckBox):
-                unattended_element.setChecked(self.config_manager.unattended_mode_enabled)
-                unattended_element.setToolTip("启用后实现真正的无人持续阅卷：\n• API限流/网络波动：自动等待15分钟后重试，最多10次，循环直到恢复\n• AI内容问题（字迹不清等）：按填充率自动给保守分并标记待复核\n  - 标准模式：<25%给0分，否则给步长最小分\n  - 三步打分：每步各给1分（共3分），便于快速定位回评\n• 无人模式与双评互斥：两者无法同时使用\n禁用：遇到问题立即停止，等待人工处理")
 
             # 加载题目配置
             for i in range(1, self.max_questions + 1):
@@ -947,8 +933,6 @@ class MainWindow(QMainWindow):
                 'first_model_id': self.config_manager.first_modelID,
                 'second_model_id': self.config_manager.second_modelID,
                 'is_single_question_one_run': len(enabled_questions_indices) == 1,
-                # 无人模式配置
-                'unattended_mode_enabled': self.config_manager.unattended_mode_enabled,
             }
 
             self.worker.set_parameters(**params)
@@ -1198,47 +1182,25 @@ class MainWindow(QMainWindow):
             has_ocr_then_grade = False
 
         dual_eval_checkbox = self.get_ui_element('dual_evaluation_enabled')
-        unattended_checkbox = self.get_ui_element('unattended_mode_enabled')
-        
-        # 获取双评和无人模式的当前状态
-        is_dual_enabled = dual_eval_checkbox and dual_eval_checkbox.isChecked() if dual_eval_checkbox else False
-        is_unattended_enabled = unattended_checkbox and unattended_checkbox.isChecked() if unattended_checkbox else False
         
         # ===========================================================
-        # 双评与无人模式互斥逻辑
+        # 双评启用条件
         # ===========================================================
         if dual_eval_checkbox:
-            # 双评允许条件：单题模式 + 非识评分离 + 无人模式未开启
-            dual_allowed = is_single_q1_mode and not has_ocr_then_grade and not is_unattended_enabled
+            # 双评允许条件：单题模式 + 非识评分离
+            dual_allowed = is_single_q1_mode and not has_ocr_then_grade
             dual_eval_checkbox.setEnabled(dual_allowed)
             if (not dual_allowed) and dual_eval_checkbox.isChecked():
                 dual_eval_checkbox.blockSignals(True)
                 dual_eval_checkbox.setChecked(False)
                 self.handle_checkBox_save('dual_evaluation_enabled', False)
                 dual_eval_checkbox.blockSignals(False)
-                is_dual_enabled = False
-                if is_unattended_enabled:
-                    self.log_message("无人模式与双评互斥，已自动关闭双评", False, "INFO")
             
             is_dual_active = dual_eval_checkbox.isChecked() and dual_eval_checkbox.isEnabled()
             self._safe_set_enabled('score_diff_threshold', is_dual_active)
         
-        if unattended_checkbox:
-            # 无人模式允许条件：双评未开启
-            unattended_allowed = not is_dual_enabled
-            unattended_checkbox.setEnabled(unattended_allowed)
-            if (not unattended_allowed) and unattended_checkbox.isChecked():
-                unattended_checkbox.blockSignals(True)
-                unattended_checkbox.setChecked(False)
-                self.handle_checkBox_save('unattended_mode_enabled', False)
-                unattended_checkbox.blockSignals(False)
-                self.log_message("双评与无人模式互斥，已自动关闭无人模式", False, "INFO")
-        
         # 第二组API的启用逻辑：
-        # 1. 双评模式启用时需要第二组API
-        # 2. 无人模式启用时也需要第二组API（用于故障转移）
-        # 3. 或者始终启用（因为单评模式下也需要故障转移）
-        # 根据策略文档，单评模式下也强制要求配置两个API
+        # 单评模式下也需要配置两个API用于故障转移
         # 因此始终启用第二组API的配置控件
         second_api_enabled = True  # 始终启用第二组API配置
         self._safe_set_enabled('second_api_url', second_api_enabled)
@@ -1443,7 +1405,7 @@ class MainWindow(QMainWindow):
             'first_api_url', 'first_api_key', 'first_modelID',
             'second_api_url', 'second_api_key', 'second_modelID',
             'dual_evaluation_enabled', 'score_diff_threshold', 'subject_text',
-            'cycle_number', 'wait_time', 'api_test_button', 'unattended_mode_enabled'
+            'cycle_number', 'wait_time', 'api_test_button'
         ]
         # 支持7道题
         for i in range(1, self.max_questions + 1):
@@ -1567,25 +1529,6 @@ class MainWindow(QMainWindow):
         if cb: cb.stateChanged.connect(self.on_dual_evaluation_changed)
         spin = self.get_ui_element('score_diff_threshold')
         if spin: spin.valueChanged.connect(lambda val: self.handle_spinBox_save('score_diff_threshold', val))
-
-    def setup_unattended_mode(self):
-        """设置无人模式相关控件的信号连接"""
-        cb = self.get_ui_element('unattended_mode_enabled')
-        if cb: 
-            cb.stateChanged.connect(self.on_unattended_mode_changed)
-
-    def on_unattended_mode_changed(self, state):
-        """无人模式开关变化处理"""
-        if self._is_initializing: return
-        is_enabled = bool(state)
-        self.handle_checkBox_save('unattended_mode_enabled', is_enabled)
-        self._apply_ui_constraints()
-        
-        # 提示用户无人模式的含义
-        if is_enabled:
-            self.log_message("无人模式已启用：API限流/网络波动时自动等待15分钟重试（最多10次）；AI内容问题时按填充率自动给保守分。与双评互斥。")
-        else:
-            self.log_message("无人模式已禁用：遇到问题时将立即停止并等待人工处理")
 
     def _connect_signals(self):
         """统一连接所有UI控件的信号与槽"""

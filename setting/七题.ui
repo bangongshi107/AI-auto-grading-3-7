@@ -468,22 +468,6 @@ QScrollBar::sub-line:horizontal {
            </widget>
           </item>
           <item>
-           <widget class="QCheckBox" name="unattended_mode_enabled">
-            <property name="enabled">
-             <bool>true</bool>
-            </property>
-            <property name="toolTip">
-             <string>不启用，则AI失败时程序立即停止；启用后，AI失败时不停继续尝试</string>
-            </property>
-            <property name="text">
-             <string>无人模式      </string>
-            </property>
-            <property name="checked">
-             <bool>false</bool>
-            </property>
-           </widget>
-          </item>
-          <item>
            <widget class="QPushButton" name="api_test_button">
             <property name="text">
              <string>测试api连接</string>
