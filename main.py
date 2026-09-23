@@ -55,7 +55,7 @@ if sys.platform == 'win32':
     except Exception:
         pass  # 如果设置失败，继续使用默认编码
 
-from PyQt5.QtWidgets import QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
+from PyQt5.QtWidgets import QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QCheckBox
 from PyQt5.QtCore import Qt, QTimer, QAbstractNativeEventFilter
 from PyQt5.QtGui import QFont, QIcon
 from ui_components.main_window import MainWindow
@@ -177,10 +177,12 @@ class SimpleNotificationDialog(QDialog):
 
 class ManualInterventionDialog(QDialog):
     """专用于人工介入提示的模态对话框，带重复提示音提醒用户处理"""
-    def __init__(self, title, message, raw_feedback=None, sound_type='error', parent=None):
+    def __init__(self, title, message, raw_feedback=None, sound_type='error', parent=None, source_code=''):
         super().__init__(parent)
         self.sound_type = sound_type
         self.raw_feedback = raw_feedback or ''
+        self.source_code = source_code or ''
+        self.suppress_checkbox = None
         self.setup_ui(title, message)
         self.setup_sound_timer()
 
@@ -217,6 +219,13 @@ class ManualInterventionDialog(QDialog):
         fb_label.setWordWrap(True)
         fb_label.setStyleSheet("padding: 6px; color: #333333; background: #f7f7f7; border-radius:4px;")
         layout.addWidget(fb_label)
+
+        # 仅当本次弹窗是由"填充率幻觉校验"触发时，才提供本项检测的关闭选项，
+        # 避免误关其它类型的人工介入检测（如卡页、连续0分等）。
+        if self.source_code == 'hallucination_guard':
+            self.suppress_checkbox = QCheckBox("本次阅卷不再进行填充率校验（AI幻觉兜底检测）。如需重新启用，请重启软件。")
+            self.suppress_checkbox.setStyleSheet("padding: 4px;")
+            layout.addWidget(self.suppress_checkbox)
 
         # 按钮区域
         button_layout = QHBoxLayout()
@@ -708,7 +717,7 @@ class Application:
         self.main_window.raise_()  # 将窗口提升到最前
         self.main_window.activateWindow()  # 激活窗口
 
-    def show_manual_intervention_notification(self, message, raw_feedback):
+    def show_manual_intervention_notification(self, message, raw_feedback, source_code=''):
         """当工作线程请求人工介入时调用，展示模态对话框并播放提示音。
         
         流程说明：
@@ -720,6 +729,8 @@ class Application:
         参数说明：
         - message: AI判断的具体原因（如"学生提交的内容为风景图片，无法评分"）
         - raw_feedback: 学生答案摘要（如"提交了一张湖岸树林的风景图片..."）
+        - source_code: 触发来源标识（如"hallucination_guard"），用于决定是否展示
+          "本轮不再进行填充率校验"这类专属选项，避免误用于其它类型的人工介入
         """
         # 标记：接下来短时间内如果收到 error_signal，不再重复弹"阅卷中断"
         try:
@@ -743,10 +754,16 @@ class Application:
             message=(f"{display_message}\n\n请人工检查并处理当前试卷。\n处理完毕后，点击主窗口的\"开始阅卷\"按钮继续。"),
             raw_feedback=raw_feedback,
             sound_type='error',
-            parent=self.main_window
+            parent=self.main_window,
+            source_code=source_code
         )
         dialog.exec_()
-        
+
+        # 若用户勾选了"本轮不再进行填充率校验"，通知worker后续跳过该项检测
+        if dialog.suppress_checkbox is not None and dialog.suppress_checkbox.isChecked():
+            if hasattr(self.worker, 'suppress_hallucination_guard_for_this_task'):
+                self.worker.suppress_hallucination_guard_for_this_task()
+
         # 对话框关闭后，确保worker已停止并记录日志
         if self.worker.isRunning():
             self.worker.stop()

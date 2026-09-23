@@ -791,7 +791,7 @@ class GradingThread(QThread):
     finished_signal = pyqtSignal()
     error_signal = pyqtSignal(str)
     threshold_exceeded_signal = pyqtSignal(str)
-    manual_intervention_signal = pyqtSignal(str, str)
+    manual_intervention_signal = pyqtSignal(str, str, str)  # message, detail, source_code
     record_signal = pyqtSignal(dict)
 
     def __init__(self, api_service, config_manager=None):
@@ -854,6 +854,8 @@ class GradingThread(QThread):
 
         # AI幻觉保护：图像几乎空白但AI给出非零分数时的填充率阈值（见 _check_hallucination_guard）
         self.HALLUCINATION_FILL_RATE_THRESHOLD = 0.08
+        # 用户可在人工介入弹窗中选择"本轮阅卷不再进行填充率校验"，仅内存态，每次新任务开始时重置
+        self._hallucination_guard_suppressed = False
 
         # =================================================================
         # 卡页/重复截图保护：不再依赖"判空"作为前提，只要连续多轮的答题区域
@@ -908,16 +910,16 @@ class GradingThread(QThread):
         # 证据门槛（保留示例和所有关键规则）
         evidence_bar = (
             "【证据】\n"
-            "只有找到直接证据才给分；无法评分则人工介入（不想象/猜/补全/疑似）。\n"
+            "只有找到直接证据才给分（不想象/猜/补全/疑似）；证据不足、无法合理判分时按【人工介入】小节处理。\n"
             "无法辨认的字视为无效答案，不给分；禁止猜测或按疑似内容给分。\n"
             "scoring_basis逐点：判定+得X分+证据【…】。避免使用\"\"避免JSON错误。示例：第1点 未命中 得0分 证据:【...】\n"
-            "若答案空白/涂改/乱写/答非所问/全错，可依细则判0分，需在scoring_basis说明理由和证据；判0分必须有证据（禁止想象/猜/补全），无法判断就人工介入。\n"
+            "若答案空白/涂改/乱写/答非所问/全错，可依细则判0分，需在scoring_basis说明理由和证据；判0分必须有证据（禁止想象/猜/补全）。\n"
         )
 
         # 扣分条款
         penalty_rules = (
             "【扣分】\n"
-            "有扣分条款时先给分再扣分；扣分需证据，无法判断就人工介入。\n"
+            "有扣分条款时先给分再扣分；扣分需证据。\n"
         )
 
         # 安全规则（保留关键示例）
@@ -967,7 +969,7 @@ class GradingThread(QThread):
         system_message = self._get_common_system_message()
         user_prompt = (
             "【题目类型：公式计算/证明题】\n"
-            "- 按评分细则的步骤/采分点核对：公式、代入、计算/推理、符号等；证据不足、无法评分就触发人工介入协议。\n\n"
+            "- 按评分细则的步骤/采分点核对：公式、代入、计算/推理、符号等。\n\n"
             "【评分细则】\n"
             f"{standard_answer_rubric.strip()}\n"
         )
@@ -1098,7 +1100,7 @@ class GradingThread(QThread):
         elif question_type == "Formula_Proof_StepBased":
             user_prompt = (
                 "【题目类型：公式计算/证明题】\n"
-                "- 按评分细则的步骤/采分点核对：公式、代入、计算/推理、符号等；证据不足、无法评分就触发人工介入协议。\n\n"
+                "- 按评分细则的步骤/采分点核对：公式、代入、计算/推理、符号等。\n\n"
                 + base_user_prompt
             )
         elif question_type == "Holistic_Evaluation_Open":
@@ -1274,7 +1276,8 @@ class GradingThread(QThread):
         )
         self.manual_intervention_signal.emit(
             "两个AI接口交叉重试均失败",
-            "请检查: 1)网络连接 2)API密钥 3)模型ID"
+            "请检查: 1)网络连接 2)API密钥 3)模型ID",
+            ""
         )
         return None, None, None, None, "", "两个AI接口均失败"
 
@@ -1373,7 +1376,8 @@ class GradingThread(QThread):
         )
         self.manual_intervention_signal.emit(
             "两个AI接口交叉重试均失败",
-            "请检查: 1)网络连接 2)API密钥 3)模型ID"
+            "请检查: 1)网络连接 2)API密钥 3)模型ID",
+            ""
         )
         return None, None, None, None, "", f"评分失败（已交叉重试4次）: {last_error}"
 
@@ -1713,6 +1717,8 @@ class GradingThread(QThread):
         Returns:
             触发时返回用于展示的原因说明字符串；未触发返回 None。
         """
+        if self._hallucination_guard_suppressed:
+            return None
         if not img_str or score is None or score <= 0:
             return None
         try:
@@ -1725,6 +1731,18 @@ class GradingThread(QThread):
                 "请人工核实该题评分是否准确。"
             )
         return None
+
+    def suppress_hallucination_guard_for_this_task(self) -> None:
+        """用户在人工介入弹窗中选择"本轮阅卷不再进行填充率校验"后调用。
+
+        仅内存态生效，范围为"本次程序运行期间"（不随重新开始阅卷任务而重置，
+        仅在程序重启后恢复），不写入配置文件。
+        """
+        self._hallucination_guard_suppressed = True
+        self.log_signal.emit(
+            "用户已选择本轮阅卷不再进行填充率校验（AI幻觉兜底检测），该检测项在本次程序运行期间将不再触发",
+            False, "WARNING"
+        )
 
     def _set_error_state(self, reason, error: Optional[GradingError] = None):
         """统一设置错误状态（线程安全）
@@ -1784,7 +1802,8 @@ class GradingThread(QThread):
         message: str = "",
         detail: str = "",
         emit_signal: bool = True,
-        log_level: str = "ERROR"
+        log_level: str = "ERROR",
+        source_code: str = ""
     ) -> None:
         """统一阅卷停止入口（线程安全）
         
@@ -1860,20 +1879,20 @@ class GradingThread(QThread):
         if emit_signal:
             try:
                 if reason == StopReason.MANUAL_INTERVENTION:
-                    # 人工介入信号：message 是主消息，detail 是补充说明
-                    self.manual_intervention_signal.emit(message, detail)
+                    # 人工介入信号：message 是主消息，detail 是补充说明，source_code 标识触发来源
+                    self.manual_intervention_signal.emit(message, detail, source_code)
 
                 elif reason == StopReason.ZERO_SCORE_STREAK:
                     # 连续多份0分同样触发人工介入信号
-                    self.manual_intervention_signal.emit(f"连续多份0分: {message}", detail)
+                    self.manual_intervention_signal.emit(f"连续多份0分: {message}", detail, "")
 
                 elif reason == StopReason.STUCK_PAGE:
                     # 卡页同样触发人工介入信号，提示用户检查阅卷页面
-                    self.manual_intervention_signal.emit(f"检测到卡页: {message}", detail)
+                    self.manual_intervention_signal.emit(f"检测到卡页: {message}", detail, "")
 
                 elif reason == StopReason.SCREENSHOT_MISMATCH:
                     # 写入前核验发现页面已变化，触发人工介入信号
-                    self.manual_intervention_signal.emit(message, detail)
+                    self.manual_intervention_signal.emit(message, detail, "")
 
                 elif reason == StopReason.THRESHOLD_EXCEEDED:
                     # 双评阈值超限信号
@@ -2239,7 +2258,8 @@ class GradingThread(QThread):
                 message=f"第 {question_index} 题{hallucination_msg}",
                 detail="",
                 emit_signal=True,
-                log_level="WARNING"
+                log_level="WARNING",
+                source_code="hallucination_guard"
             )
             return False
 
@@ -2613,6 +2633,8 @@ class GradingThread(QThread):
         self.last_used_ocr_api = "first"
         self._manual_intervention_latched = False
         self._manual_intervention_latch_message = ""
+        # 注意：_hallucination_guard_suppressed 不在此处重置——范围是"本次程序运行期间"，
+        # 只在 __init__ 时重置一次，重新开始阅卷任务不应清除用户的关闭选择。
 
     def stop(self):
         """停止线程（用户手动停止）
@@ -2971,7 +2993,8 @@ class GradingThread(QThread):
         )
         self.manual_intervention_signal.emit(
             "两个AI接口交叉重试均失败",
-            "请检查: 1)网络连接 2)API密钥 3)模型ID"
+            "请检查: 1)网络连接 2)API密钥 3)模型ID",
+            ""
         )
         return None, "两个AI接口均失败", None, None, last_response_text
 
@@ -3269,6 +3292,9 @@ class GradingThread(QThread):
                 
                 self.log_signal.emit(f"AI请求人工介入: {ai_reason}", True, "WARNING")
                 
+                # 明确标注是AI主动要求人工介入（而非系统检测规则触发），便于弹窗提示区分责任归属
+                ai_reason = f"【AI要求人工介入】{ai_reason}"
+                
                 # 返回带有标记的结构，由上层决定是触发无人模式还是停止阅卷
                 return False, {'manual_intervention': True, 'message': ai_reason, 'raw_feedback': student_answer_summary, 'already_logged': True}
 
@@ -3459,68 +3485,38 @@ class GradingThread(QThread):
 
     def _detect_manual_intervention_feedback(self, student_answer_summary: str, scoring_basis: str) -> Optional[str]:
         """
-        检测AI返回的摘要或评分依据中是否包含指示需要人工介入的信号。
-        返回匹配到的简短消息（str）或空字符串/None表示未检测到。
-        
+        检测AI是否按协议明确请求人工介入。
+
+        仅当 scoring_basis 或 student_answer_summary 以"需人工介入:"/"需要人工介入:"
+        显式前缀开头时才判定为AI明确请求。不再做任何关键词模糊扫描（如"无法判断"
+        "人工复核"等），因为这类词汇经常只是AI在confidently给出0分等结论时的
+        描述性措辞，并非真的在请求人工处理，模糊扫描导致大量误停、拖慢阅卷效率。
+
         优先级：
         1. 检查 scoring_basis（最关键，优先级最高）
         2. 检查 student_answer_summary（其次）
         """
-        # 【最高优先级】优先检测 scoring_basis 中的显式人工介入前缀（严格且明确）
         try:
             if isinstance(scoring_basis, str):
                 s_trim = scoring_basis.strip()
                 # 支持英文冒号和中文冒号
                 if (s_trim.startswith('需人工介入:') or s_trim.startswith('需人工介入：') or
                     s_trim.startswith('需要人工介入:') or s_trim.startswith('需要人工介入：')):
+                    self.log_signal.emit(f"人工介入触发（scoring_basis显式前缀）：{s_trim[:80]}", True, "WARNING")
                     return '需人工介入'
         except Exception:
             pass
 
-        # 【次优先级】再检查 student_answer_summary
         try:
             if isinstance(student_answer_summary, str):
                 s_trim = student_answer_summary.strip()
                 # 支持英文冒号和中文冒号
                 if (s_trim.startswith('需人工介入:') or s_trim.startswith('需人工介入：') or
                     s_trim.startswith('需要人工介入:') or s_trim.startswith('需要人工介入：')):
+                    self.log_signal.emit(f"人工介入触发（答案摘要显式前缀）：{s_trim[:80]}", True, "WARNING")
                     return '需人工介入 (答案摘要)'
         except Exception:
             pass
-
-        if not student_answer_summary and not scoring_basis:
-            return None
-
-        combined = " ".join([str(student_answer_summary or ""), str(scoring_basis or "")])
-        s = combined.lower()
-
-        gibberish_policy = self._get_grading_policy('gibberish_answer_policy', 'manual')
-
-        always_manual_patterns = [
-            r'需(?:要)?人工介入', r'人工介入', r'需(?:要)?人工复核', r'人工复核',
-            r'无法(?:判定|评判|判断|评分)',
-            r'\bmanual intervention\b', r'\bneed manual\b', r'\bcannot (?:judge|score)\b', r'\brequires manual\b'
-        ]
-        for p in always_manual_patterns:
-            try:
-                if re.search(p, s):
-                    m = re.search(p, s)
-                    return m.group(0) if m is not None else p
-            except re.error:
-                continue
-
-        # 识别失败/乱码等：默认人工，但允许用户配置为0分
-        if gibberish_policy != 'zero':
-            soft_patterns = [
-                r'无法识别', r'识别失败', r'识别错误', r'乱码', r'噪声太大', r'\bunclear\b'
-            ]
-            for p in soft_patterns:
-                try:
-                    if re.search(p, s):
-                        m = re.search(p, s)
-                        return m.group(0) if m is not None else p
-                except re.error:
-                    continue
 
         return None
 
