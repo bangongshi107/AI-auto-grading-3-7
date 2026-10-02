@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# PyInstaller build artifacts
+build/
+dist/
+
+# Local runtime data (may contain student answers/scores or debug traces)
+Logs/
+logs/
+阅卷记录/
+
+# Local secrets: real API keys live here; only the app-generated default should stay local
+setting/config.ini

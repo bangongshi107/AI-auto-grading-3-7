@@ -1,5 +1,4 @@
 import time
-from decimal import Decimal, ROUND_HALF_UP
 import base64
 import traceback
 import pyautogui
@@ -14,774 +13,11 @@ import random
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Callable, Tuple, Union, cast
 from threading import Lock
-from functools import wraps
-from enum import Enum
 
-
-# ==================== 停止原因分类枚举 ====================
-
-class StopReason(Enum):
-    """阅卷停止原因分类
-    
-    用于统一管理所有导致阅卷停止的原因，便于：
-    1. UI层根据不同原因显示不同的提示和建议
-    2. 日志系统分类统计停止原因
-    3. 决定是否可以自动恢复/重试
-    """
-    # 正常完成
-    COMPLETED = "completed"                    # 正常完成所有阅卷
-    
-    # 用户主动操作
-    USER_STOPPED = "user_stopped"              # 用户手动点击停止按钮
-    
-    # 需要人工介入（AI判断）
-    MANUAL_INTERVENTION = "manual_intervention"  # AI判断需要人工介入（如无法识别答案）
-    ZERO_SCORE_STREAK = "zero_score_streak"    # 连续多份卷子全部题目均为0分，疑似异常试卷/AI持续误判
-    STUCK_PAGE = "stuck_page"                  # 卡页：连续多轮截图与上一轮高度相似，疑似页面未刷新
-    SCREENSHOT_MISMATCH = "screenshot_mismatch"  # 写入分数前二次核验发现页面内容已变化，为避免错评已停止
-    THRESHOLD_EXCEEDED = "threshold_exceeded"  # 双评分差超过阈值
-    
-    # 技术错误（可能可重试）
-    NETWORK_ERROR = "network_error"            # 网络错误（超时、连接失败等）
-    API_ERROR = "api_error"                    # API错误（两个API都失败）
-    
-    # 配置/资源错误（需要修改配置）
-    CONFIG_ERROR = "config_error"              # 配置错误（缺少必要配置）
-    RESOURCE_ERROR = "resource_error"          # 资源错误（文件读写、截图失败等）
-    
-    # 业务逻辑错误
-    SCORE_PARSE_ERROR = "score_parse_error"    # 分数解析错误
-    
-    # 未知错误
-    UNKNOWN_ERROR = "unknown_error"            # 未知错误
-    
-    @property
-    def is_recoverable(self) -> bool:
-        """判断该停止原因是否可能通过重试恢复"""
-        return self in (
-            StopReason.NETWORK_ERROR,
-            StopReason.API_ERROR,
-        )
-    
-    @property
-    def needs_config_fix(self) -> bool:
-        """判断是否需要用户修改配置才能继续"""
-        return self in (
-            StopReason.CONFIG_ERROR,
-            StopReason.RESOURCE_ERROR,
-        )
-    
-    @property
-    def needs_manual_review(self) -> bool:
-        """判断是否需要人工审核当前试卷"""
-        return self in (
-            StopReason.MANUAL_INTERVENTION,
-            StopReason.ZERO_SCORE_STREAK,
-            StopReason.STUCK_PAGE,
-            StopReason.SCREENSHOT_MISMATCH,
-            StopReason.THRESHOLD_EXCEEDED,
-        )
-    
-    @property
-    def user_friendly_name(self) -> str:
-        """返回用户友好的停止原因名称"""
-        names = {
-            StopReason.COMPLETED: "阅卷完成",
-            StopReason.USER_STOPPED: "用户停止",
-            StopReason.MANUAL_INTERVENTION: "需人工介入",
-            StopReason.ZERO_SCORE_STREAK: "连续多份0分",
-            StopReason.STUCK_PAGE: "卡页未刷新",
-            StopReason.SCREENSHOT_MISMATCH: "评分对象与页面不匹配",
-            StopReason.THRESHOLD_EXCEEDED: "双评分差过大",
-            StopReason.NETWORK_ERROR: "网络错误",
-            StopReason.API_ERROR: "AI接口错误",
-            StopReason.CONFIG_ERROR: "配置错误",
-            StopReason.RESOURCE_ERROR: "资源错误",
-            StopReason.SCORE_PARSE_ERROR: "分数解析错误",
-            StopReason.UNKNOWN_ERROR: "未知错误",
-        }
-        return names.get(self, "未知")
-
-
-# ==================== 自定义异常层次结构 ====================
-
-class GradingError(Exception):
-    """阅卷系统基础异常类
-    
-    所有自定义异常的基类，提供统一的错误信息格式和恢复建议。
-    """
-    
-    def __init__(self, message: str, recoverable: bool = False, 
-                 recovery_action: str = "", original_error: Optional[Exception] = None):
-        """
-        Args:
-            message: 错误描述信息
-            recoverable: 是否可自动恢复
-            recovery_action: 建议的恢复操作
-            original_error: 原始异常（用于异常链）
-        """
-        super().__init__(message)
-        self.message = message
-        self.recoverable = recoverable
-        self.recovery_action = recovery_action
-        self.original_error = original_error
-    
-    def __str__(self):
-        base = self.message
-        if self.recovery_action:
-            base += f" [建议操作: {self.recovery_action}]"
-        return base
-
-
-class ConfigError(GradingError):
-    """配置相关错误
-    
-    包括：配置文件缺失/格式错误、必需参数未设置、参数值无效等。
-    通常需要用户修改配置后重试。
-    """
-    
-    def __init__(self, message: str, config_key: str = "", 
-                 expected_type: str = "", original_error: Optional[Exception] = None):
-        recovery = "请检查配置文件或在设置界面修正配置"
-        if config_key:
-            recovery = f"请检查配置项 '{config_key}'"
-            if expected_type:
-                recovery += f"，期望类型: {expected_type}"
-        super().__init__(message, recoverable=False, 
-                        recovery_action=recovery, original_error=original_error)
-        self.config_key = config_key
-        self.expected_type = expected_type
-
-
-class NetworkError(GradingError):
-    """网络相关错误
-    
-    包括：连接超时、网络不可达、API服务不可用、限流等。
-    通常可以通过重试恢复。
-    """
-    
-    # 网络错误子类型
-    TYPE_TIMEOUT = "timeout"           # 连接/读取超时
-    TYPE_CONNECTION = "connection"     # 连接失败
-    TYPE_RATE_LIMIT = "rate_limit"     # API限流（429）
-    TYPE_SERVICE_DOWN = "service_down" # 服务不可用（503）
-    TYPE_SERVER_ERROR = "server_error" # 服务器内部错误（5xx）
-    
-    def __init__(self, message: str, error_type: str = "", 
-                 retry_after: int = 0, original_error: Optional[Exception] = None):
-        # 根据错误类型设置恢复建议
-        recovery_map = {
-            self.TYPE_TIMEOUT: "请检查网络连接，稍后重试",
-            self.TYPE_CONNECTION: "请检查网络连接和API地址配置",
-            self.TYPE_RATE_LIMIT: f"API请求过于频繁，请等待{retry_after}秒后重试" if retry_after else "API请求过于频繁，请稍后重试",
-            self.TYPE_SERVICE_DOWN: "API服务暂时不可用，请稍后重试",
-            self.TYPE_SERVER_ERROR: "API服务器错误，请稍后重试",
-        }
-        recovery = recovery_map.get(error_type, "请检查网络连接后重试")
-        
-        # 网络错误通常可重试
-        super().__init__(message, recoverable=True, 
-                        recovery_action=recovery, original_error=original_error)
-        self.error_type = error_type
-        self.retry_after = retry_after
-
-
-class BusinessError(GradingError):
-    """业务逻辑错误
-    
-    包括：评分解析失败、分数超出范围、答案区域无效等。
-    根据具体情况可能需要人工介入或可以自动恢复。
-    """
-    
-    # 业务错误子类型
-    TYPE_SCORE_PARSE = "score_parse"       # 分数解析失败
-    TYPE_SCORE_RANGE = "score_range"       # 分数超出范围
-    TYPE_AREA_INVALID = "area_invalid"     # 答案区域无效
-    TYPE_API_RESPONSE = "api_response"     # API响应格式错误
-    TYPE_DUAL_EVAL = "dual_eval"           # 双评分差超阈值
-    
-    def __init__(self, message: str, error_type: str = "", 
-                 question_index: int = 0, recoverable: bool = False,
-                 original_error: Optional[Exception] = None):
-        # 根据错误类型设置恢复建议
-        recovery_map = {
-            self.TYPE_SCORE_PARSE: "AI返回的分数格式无效，请检查评分细则或手动评分",
-            self.TYPE_SCORE_RANGE: "分数已自动修正到有效范围",
-            self.TYPE_AREA_INVALID: "请重新配置答案区域",
-            self.TYPE_API_RESPONSE: "API响应格式异常，可能需要更换模型",
-            self.TYPE_DUAL_EVAL: "双评分差超过阈值，需要人工复核",
-        }
-        recovery = recovery_map.get(error_type, "请检查相关配置或手动处理")
-        
-        super().__init__(message, recoverable=recoverable, 
-                        recovery_action=recovery, original_error=original_error)
-        self.error_type = error_type
-        self.question_index = question_index
-
-
-class ResourceError(GradingError):
-    """资源相关错误
-    
-    包括：文件读写失败、内存不足、截图失败等系统资源问题。
-    """
-    
-    TYPE_FILE_IO = "file_io"           # 文件读写错误
-    TYPE_SCREENSHOT = "screenshot"     # 截图失败
-    TYPE_MEMORY = "memory"             # 内存不足
-    
-    def __init__(self, message: str, error_type: str = "",
-                 resource_path: str = "", original_error: Optional[Exception] = None):
-        recovery_map = {
-            self.TYPE_FILE_IO: f"文件操作失败: {resource_path}" if resource_path else "文件操作失败，请检查权限",
-            self.TYPE_SCREENSHOT: "截图失败，请检查屏幕访问权限",
-            self.TYPE_MEMORY: "内存不足，请关闭其他程序后重试",
-        }
-        recovery = recovery_map.get(error_type, "请检查系统资源")
-        
-        super().__init__(message, recoverable=False,
-                        recovery_action=recovery, original_error=original_error)
-        self.error_type = error_type
-        self.resource_path = resource_path
-
-
-# ==================== 异常恢复策略管理器 ====================
-
-class ErrorRecoveryManager:
-    """异常恢复策略管理器
-    
-    根据不同类型的异常提供相应的恢复策略和建议。
-    """
-    
-    @staticmethod
-    def classify_exception(error: Exception) -> GradingError:
-        """将标准异常转换为自定义异常类型
-        
-        Args:
-            error: 原始异常
-            
-        Returns:
-            对应的GradingError子类实例
-        """
-        error_str = str(error).lower()
-        
-        # 检测网络相关错误
-        if any(kw in error_str for kw in ['timeout', '超时', 'timed out']):
-            return NetworkError(str(error), NetworkError.TYPE_TIMEOUT, original_error=error)
-        
-        if any(kw in error_str for kw in ['connection', '连接', 'network', '网络']):
-            return NetworkError(str(error), NetworkError.TYPE_CONNECTION, original_error=error)
-        
-        if any(kw in error_str for kw in ['429', 'rate limit', '限流', 'too many']):
-            return NetworkError(str(error), NetworkError.TYPE_RATE_LIMIT, original_error=error)
-        
-        if any(kw in error_str for kw in ['503', 'service unavailable', '服务不可用']):
-            return NetworkError(str(error), NetworkError.TYPE_SERVICE_DOWN, original_error=error)
-        
-        if any(kw in error_str for kw in ['500', '502', '504', 'internal server']):
-            return NetworkError(str(error), NetworkError.TYPE_SERVER_ERROR, original_error=error)
-        
-        # 检测配置相关错误
-        if isinstance(error, KeyError):
-            return ConfigError(f"配置字段缺失: {error}", config_key=str(error), original_error=error)
-        
-        if isinstance(error, ValueError):
-            # 尝试区分配置错误和业务错误
-            if any(kw in error_str for kw in ['config', '配置', 'parameter', '参数']):
-                return ConfigError(str(error), original_error=error)
-            else:
-                return BusinessError(str(error), BusinessError.TYPE_SCORE_PARSE, original_error=error)
-        
-        # 检测资源相关错误
-        if isinstance(error, (IOError, OSError, FileNotFoundError, PermissionError)):
-            return ResourceError(str(error), ResourceError.TYPE_FILE_IO, original_error=error)
-        
-        if isinstance(error, MemoryError):
-            return ResourceError(str(error), ResourceError.TYPE_MEMORY, original_error=error)
-        
-        # 默认作为业务错误
-        return BusinessError(str(error), original_error=error)
-    
-    @staticmethod
-    def get_recovery_strategy(error: GradingError) -> dict:
-        """获取错误恢复策略
-        
-        Args:
-            error: GradingError实例
-            
-        Returns:
-            恢复策略字典，包含:
-            - should_retry: 是否应该重试
-            - retry_delay: 重试延迟（秒）
-            - max_retries: 最大重试次数
-            - should_stop: 是否应该停止整个流程
-            - notify_user: 是否需要通知用户
-            - log_level: 日志级别
-        """
-        strategy = {
-            'should_retry': False,
-            'retry_delay': 1.0,
-            'max_retries': 3,
-            'should_stop': True,
-            'notify_user': True,
-            'log_level': 'ERROR'
-        }
-        
-        if isinstance(error, NetworkError):
-            # 网络错误：通常可重试
-            strategy['should_retry'] = True
-            strategy['should_stop'] = False
-            strategy['log_level'] = 'WARNING'
-            
-            if error.error_type == NetworkError.TYPE_RATE_LIMIT:
-                strategy['retry_delay'] = max(error.retry_after, 5.0)
-                strategy['max_retries'] = 5
-            elif error.error_type == NetworkError.TYPE_TIMEOUT:
-                strategy['retry_delay'] = 2.0
-                strategy['max_retries'] = 3
-            elif error.error_type == NetworkError.TYPE_SERVER_ERROR:
-                strategy['retry_delay'] = 3.0
-                strategy['max_retries'] = 2
-        
-        elif isinstance(error, ConfigError):
-            # 配置错误：需要停止并通知用户
-            strategy['should_retry'] = False
-            strategy['should_stop'] = True
-            strategy['notify_user'] = True
-            strategy['log_level'] = 'ERROR'
-        
-        elif isinstance(error, BusinessError):
-            # 业务错误：根据子类型决定
-            if error.error_type == BusinessError.TYPE_SCORE_RANGE:
-                # 分数范围错误：已自动修正，可继续
-                strategy['should_retry'] = False
-                strategy['should_stop'] = False
-                strategy['notify_user'] = False
-                strategy['log_level'] = 'WARNING'
-            elif error.error_type == BusinessError.TYPE_DUAL_EVAL:
-                # 双评差异：需要人工介入
-                strategy['should_stop'] = True
-                strategy['notify_user'] = True
-            else:
-                # 其他业务错误：停止当前题目
-                strategy['should_stop'] = True
-                strategy['notify_user'] = True
-        
-        elif isinstance(error, ResourceError):
-            # 资源错误：通常需要停止
-            strategy['should_retry'] = False
-            strategy['should_stop'] = True
-            strategy['notify_user'] = True
-            strategy['log_level'] = 'ERROR'
-        
-        return strategy
-    
-    @staticmethod
-    def format_error_message(error: GradingError, include_recovery: bool = True) -> str:
-        """格式化错误消息
-        
-        Args:
-            error: GradingError实例
-            include_recovery: 是否包含恢复建议
-            
-        Returns:
-            格式化的错误消息
-        """
-        # 确定错误类型前缀
-        type_prefix = {
-            ConfigError: "[配置错误]",
-            NetworkError: "[网络错误]",
-            BusinessError: "[业务错误]",
-            ResourceError: "[资源错误]",
-            GradingError: "[系统错误]"
-        }
-        
-        prefix = "[错误]"
-        for err_type, pref in type_prefix.items():
-            if isinstance(error, err_type):
-                prefix = pref
-                break
-        
-        message = f"{prefix} {error.message}"
-        
-        if include_recovery and error.recovery_action:
-            message += f"\n  → 建议: {error.recovery_action}"
-        
-        return message
-
-
-# ==================== 分数处理管道类 ====================
-
-class ScoreProcessor:
-    """
-    统一的分数处理管道类，负责分数的清洗→校验→四舍五入→范围限制。
-    确保所有分数处理逻辑集中在一个地方，避免边界情况漏处理。
-    """
-    
-    @staticmethod
-    def sanitize(val) -> float:
-        """
-        清洗和标准化分数输入，确保返回有效的浮点数。
-        如果无法提取有效数字，抛出 ValueError 以确保评分准确性。
-        
-        Args:
-            val: 待清洗的分数值（可以是数字、字符串等）
-            
-        Returns:
-            清洗后的浮点数
-            
-        Raises:
-            ValueError: 无法转换为有效分数时
-        """
-        if isinstance(val, (int, float)):
-            return float(val)
-        
-        # 尝试从字符串中提取数字
-        try:
-            # 提取浮点数（包括负数）
-            match = re.search(r'-?\d+\.?\d*', str(val))
-            if match:
-                return float(match.group())
-        except Exception:
-            pass
-        
-        raise ValueError(f"无法将 {val} 转换为有效的分数")
-    
-    @staticmethod
-    def round_to_step(value: float, step: float) -> float:
-        """
-        将数值四舍五入到指定步长的倍数。
-        
-        Args:
-            value: 要四舍五入的数值
-            step: 步长（如0.5或1）
-        
-        Returns:
-            四舍五入后的值
-            
-        Examples:
-            round_to_step(7.3, 0.5) -> 7.5
-            round_to_step(7.3, 1.0) -> 7.0
-            round_to_step(7.8, 0.5) -> 8.0
-        """
-        if step <= 0:
-            return value
-        try:
-            value_dec = Decimal(str(value))
-            step_dec = Decimal(str(step))
-            if step_dec == 0:
-                return value
-            scaled = value_dec / step_dec
-            rounded = scaled.quantize(Decimal('0'), rounding=ROUND_HALF_UP)
-            return float(rounded * step_dec)
-        except Exception:
-            return round(value / step) * step
-    
-    @staticmethod
-    def validate_range(score: float, min_score: float, max_score: float, 
-                      logger: Optional[Callable] = None) -> float:
-        """
-        验证分数是否在有效范围内，超出则修正并记录日志。
-        
-        Args:
-            score: 待验证的分数
-            min_score: 最低分
-            max_score: 最高分
-            logger: 可选的日志记录函数，签名为 logger(message, is_error, level)
-            
-        Returns:
-            修正后的分数
-        """
-        if score < min_score:
-            if logger:
-                logger(f"分数 {score} 低于最低分 {min_score}，修正为 {min_score}。", True, "ERROR")
-            return min_score
-        elif score > max_score:
-            if logger:
-                logger(f"分数 {score} 超出最高分 {max_score}，修正为 {max_score}。", True, "ERROR")
-            return max_score
-        return score
-    
-    @classmethod
-    def process_pipeline(cls, raw_score, min_score: float, max_score: float, 
-                        rounding_step: float = 0.5,
-                        logger: Optional[Callable] = None) -> Tuple[float, str]:
-        """
-        完整的分数处理管道：清洗→四舍五入→范围校验。
-        
-        Args:
-            raw_score: 原始分数（任意类型）
-            min_score: 最低分
-            max_score: 最高分
-            rounding_step: 四舍五入步长（默认0.5）
-            logger: 可选的日志记录函数
-            
-        Returns:
-            (处理后的最终分数, 处理过程描述)
-            
-        Raises:
-            ValueError: 无法清洗分数时
-        """
-        steps_log = []
-        
-        # 步骤1: 清洗分数
-        try:
-            sanitized = cls.sanitize(raw_score)
-            steps_log.append(f"清洗: {raw_score} → {sanitized}")
-        except ValueError as e:
-            raise ValueError(f"分数清洗失败: {e}")
-        
-        # 步骤2: 四舍五入到步长
-        rounded = cls.round_to_step(sanitized, rounding_step)
-        if rounded != sanitized:
-            steps_log.append(f"四舍五入(步长{rounding_step}): {sanitized} → {rounded}")
-        
-        # 步骤3: 范围校验和修正
-        validated = cls.validate_range(rounded, min_score, max_score, logger)
-        if validated != rounded:
-            steps_log.append(f"范围修正: {rounded} → {validated}")
-        
-        process_desc = " | ".join(steps_log) if steps_log else f"无需处理: {validated}"
-        return validated, process_desc
-    
-    @classmethod
-    def process_itemized_scores(cls, itemized_scores_list, 
-                                min_score: float, max_score: float,
-                                rounding_step: float = 0.5,
-                                logger: Optional[Callable] = None) -> Tuple[list, float]:
-        """
-        处理分项得分列表，返回清洗后的分数列表和总分。
-        
-        Args:
-            itemized_scores_list: 分项得分列表（可能包含字符串等）
-            min_score: 单项最低分
-            max_score: 单项最高分（用于单项校验，总分可能超出）
-            rounding_step: 四舍五入步长
-            logger: 可选的日志记录函数
-            
-        Returns:
-            (清洗后的分数列表, 计算的总分)
-            
-        Raises:
-            ValueError: 任何分项无法清洗时
-        """
-        cleaned_scores = []
-        for idx, score in enumerate(itemized_scores_list):
-            try:
-                cleaned = cls.sanitize(score)
-                cleaned_scores.append(cleaned)
-            except ValueError as e:
-                raise ValueError(f"分项得分[{idx}] 清洗失败: {e}")
-        
-        total = sum(cleaned_scores)
-        return cleaned_scores, total
-
-
-# ==================== 统一重试机制 ====================
-
-class ErrorRetryability(Enum):
-    """错误的可重试性分级（优先级从高到低）"""
-    DEFINITELY_RETRYABLE = 1    # 明确可重试：网络超时、429限流、服务暂时不可用
-    POSSIBLY_RETRYABLE = 2      # 可能可重试：Token过期、偶发5xx错误
-    NOT_WORTH_RETRYING = 3      # 不值得重试：JSON格式错误、业务逻辑错误
-    MANUAL_INTERVENTION = 4     # 需要人工介入：权限问题、功能缺陷
-
-
-def extract_error_type_and_classify(error: Exception) -> Tuple[str, ErrorRetryability]:
-    """提取错误类型并分类其可重试性
-    
-    Returns:
-        (错误类型名称, 可重试性级别)
-    """
-    s = str(error).lower()
-    
-    # 1. 明确可重试的错误
-    if 'timeout' in s or '超时' in s or 'timed out' in s:
-        return ('timeout', ErrorRetryability.DEFINITELY_RETRYABLE)
-    
-    if '429' in s or 'rate limit' in s or '限流' in s or 'too many requests' in s:
-        return ('rate_limit', ErrorRetryability.DEFINITELY_RETRYABLE)
-    
-    if 'connection' in s or '连接' in s or 'network' in s or '网络' in s:
-        return ('network', ErrorRetryability.DEFINITELY_RETRYABLE)
-    
-    if '503' in s or 'service unavailable' in s or '服务不可用' in s:
-        return ('service_unavailable', ErrorRetryability.DEFINITELY_RETRYABLE)
-    
-    # 2. 可能可重试的错误
-    if 'token' in s or 'access_token' in s:
-        # Token问题可能是过期，可以尝试刷新
-        return ('token', ErrorRetryability.POSSIBLY_RETRYABLE)
-    
-    if '500' in s or '502' in s or '504' in s or 'internal server error' in s:
-        # 偶发的服务器错误可能恢复
-        return ('server_error', ErrorRetryability.POSSIBLY_RETRYABLE)
-    
-    # 3. 不值得重试的错误
-    if 'json' in s or '格式' in s or 'parse' in s or '解析' in s:
-        return ('json_parse', ErrorRetryability.NOT_WORTH_RETRYING)
-    
-    if '400' in s or 'bad request' in s or '请求错误' in s:
-        return ('bad_request', ErrorRetryability.NOT_WORTH_RETRYING)
-    
-    if '404' in s or 'not found' in s:
-        return ('not_found', ErrorRetryability.NOT_WORTH_RETRYING)
-    
-    if 'invalid' in s or '无效' in s or '非法' in s:
-        return ('invalid_input', ErrorRetryability.NOT_WORTH_RETRYING)
-    
-    # 4. 需要人工介入的错误
-    if '401' in s or '403' in s or 'unauthorized' in s or 'forbidden' in s or '权限' in s or '认证失败' in s:
-        # 权限问题通常需要修改配置
-        return ('permission', ErrorRetryability.MANUAL_INTERVENTION)
-    
-    if 'not implemented' in s or '未实现' in s or 'unsupported' in s:
-        return ('not_implemented', ErrorRetryability.MANUAL_INTERVENTION)
-    
-    # 默认：未知错误，可能可重试
-    return ('unknown', ErrorRetryability.POSSIBLY_RETRYABLE)
-
-
-def calculate_smart_retry_delay(attempt: int, error_type: str, base_delay: float = 1.0) -> float:
-    """根据错误类型和重试次数智能计算延迟时间（指数退避+错误感知）
-    
-    Args:
-        attempt: 第几次重试（从1开始）
-        error_type: 错误类型名称
-        base_delay: 基础延迟时间（秒）
-    
-    Returns:
-        延迟时间（秒）
-    """
-    # 不同错误类型的基础延迟倍数
-    error_base_multipliers = {
-        'rate_limit': 3.0,          # 限流：延迟长一些
-        'timeout': 1.5,             # 超时：中等延迟
-        'network': 1.0,             # 网络：正常延迟
-        'token': 2.0,               # Token：稍长延迟（给时间刷新）
-        'server_error': 2.0,        # 服务器错误：稍长延迟
-        'service_unavailable': 2.5, # 服务不可用：较长延迟
-    }
-    
-    multiplier = error_base_multipliers.get(error_type, 1.0)
-    
-    # 指数退避：第1次重试 = 基础延迟，第2次 = 2倍，第3次 = 4倍...
-    exponential_factor = 2 ** (attempt - 1)
-    
-    # 添加随机抖动（±20%），避免多个请求同时重试
-    jitter = random.uniform(0.8, 1.2)
-    
-    delay = base_delay * multiplier * exponential_factor * jitter
-    
-    # 设置最大延迟上限（避免等待太久）
-    max_delay = 10.0
-    return min(delay, max_delay)
-def unified_retry(
-    max_retries: int = 1,
-    transient_error_checker: Optional[Callable[[Exception], bool]] = None,
-    retry_delay: float = 1.0,
-    log_callback: Optional[Callable[[str, bool, str], None]] = None,
-    operation_name: str = "操作"
-):
-    """
-    统一重试装饰器：对短暂性错误（网络超时、限流等）最多重试 max_retries 次，
-    对业务/配置错误立即失败。延迟采用指数退避+错误感知策略。
-    """
-    def decorator(func: Callable) -> Callable:
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            last_exception = None
-            last_error_type = 'unknown'
-            last_retryability = ErrorRetryability.POSSIBLY_RETRYABLE
-            
-            for attempt in range(max_retries + 1):  # +1 因为包含首次尝试
-                try:
-                    if attempt > 0:
-                        # 计算智能延迟（指数退避+错误感知）
-                        smart_delay = calculate_smart_retry_delay(
-                            attempt=attempt,
-                            error_type=last_error_type,
-                            base_delay=retry_delay
-                        )
-                        
-                        if log_callback:
-                            # 显示更详细的重试信息
-                            log_callback(
-                                f"{operation_name}第{attempt}次重试（错误类型:{last_error_type}, 延迟{smart_delay:.1f}秒）...",
-                                False, "DETAIL"
-                            )
-                        
-                        time.sleep(smart_delay)
-                    
-                    # 执行实际操作
-                    return func(*args, **kwargs)
-                    
-                except Exception as e:
-                    last_exception = e
-                    
-                    # 提取错误类型并分类
-                    error_type, retryability = extract_error_type_and_classify(e)
-                    last_error_type = error_type
-                    last_retryability = retryability
-                    
-                    # 判断是否应该重试（使用精细分类）
-                    should_retry = False
-                    
-                    if retryability == ErrorRetryability.DEFINITELY_RETRYABLE:
-                        # 明确可重试
-                        should_retry = True
-                    elif retryability == ErrorRetryability.POSSIBLY_RETRYABLE:
-                        # 可能可重试，使用旧的检查器兼容
-                        if transient_error_checker:
-                            try:
-                                should_retry = transient_error_checker(e)
-                            except:
-                                should_retry = True  # 默认重试一次
-                        else:
-                            should_retry = True
-                    elif retryability == ErrorRetryability.NOT_WORTH_RETRYING:
-                        # 不值得重试（如JSON格式错误）
-                        should_retry = False
-                        if log_callback:
-                            log_callback(
-                                f"{operation_name}失败（{error_type}错误不值得重试）: {str(e)}",
-                                True, "ERROR"
-                            )
-                    else:  # MANUAL_INTERVENTION
-                        # 需要人工介入（如权限问题）
-                        should_retry = False
-                        if log_callback:
-                            log_callback(
-                                f"{operation_name}失败（{error_type}错误需要人工介入）: {str(e)}",
-                                True, "ERROR"
-                            )
-                    
-                    # 根据判断决定是否重试
-                    if not should_retry:
-                        raise
-                    
-                    # 短暂性错误的处理
-                    if attempt < max_retries:
-                        # 还有重试机会
-                        if log_callback:
-                            log_callback(
-                                f"{operation_name}尝试{attempt+1}/{max_retries+1}失败（{error_type}错误）: {str(e)[:100]}，将智能重试",
-                                True, "WARNING"
-                            )
-                    else:
-                        # 最后一次尝试也失败了
-                        if log_callback:
-                            log_callback(
-                                f"{operation_name}失败（已重试{max_retries}次，{error_type}错误）: {str(e)}",
-                                True, "ERROR"
-                            )
-                        raise
-            
-            # 理论上不会到这里，但为了安全
-            if last_exception:
-                raise last_exception
-            
-        return wrapper
-    return decorator
+from grading_support import (
+    StopReason, GradingError, ConfigError, NetworkError, BusinessError, ResourceError,
+    ErrorRecoveryManager, ScoreProcessor, extract_error_type_and_classify, unified_retry,
+)
 
 
 class GradingThread(QThread):
@@ -943,103 +179,72 @@ class GradingThread(QThread):
         return base_msg
 
 
-    def _build_objective_fillintheblank_prompt(self, standard_answer_rubric: str):
-        system_message = self._get_common_system_message()
-        user_prompt = (
+    _QUESTION_TYPE_HINTS = {
+        "Objective_FillInTheBlank": (
             "【题目类型：客观填空题】\n"
             "- 逐空对照评分细则判定得分；若细则允许同义/近义给分，请在 scoring_basis 给出【证据】。\n\n"
-            "【评分细则】\n"
-            f"{standard_answer_rubric.strip()}\n"
-        )
-        return {"system": system_message, "user": user_prompt}
-
-
-    def _build_subjective_pointbased_prompt(self, standard_answer_rubric: str):
-        system_message = self._get_common_system_message()
-        user_prompt = (
+        ),
+        "Subjective_PointBased_QA": (
             "【题目类型：按点给分主观题】\n"
             "- 逐点对照评分细则判定并给分；每点在 scoring_basis 给出【证据】，禁止凭印象补全。\n\n"
-            "【评分细则】\n"
-            f"{standard_answer_rubric.strip()}\n"
-        )
-        return {"system": system_message, "user": user_prompt}
-
-
-    def _build_formula_proof_prompt(self, standard_answer_rubric: str):
-        system_message = self._get_common_system_message()
-        user_prompt = (
+        ),
+        "Formula_Proof_StepBased": (
             "【题目类型：公式计算/证明题】\n"
             "- 按评分细则的步骤/采分点核对：公式、代入、计算/推理、符号等。\n\n"
-            "【评分细则】\n"
-            f"{standard_answer_rubric.strip()}\n"
-        )
-        return {"system": system_message, "user": user_prompt}
-
-
-    def _build_holistic_evaluation_prompt(self, standard_answer_rubric: str, include_word_count: bool = False):
-        system_message = self._get_common_system_message(include_evidence_bar=False)
-        user_prompt = (
+        ),
+        "Holistic_Evaluation_Open": (
             "【题目类型：整体评估开放题】\n"
             "- 仅依据评分细则和学生答案给出总分；在 scoring_basis 说明评分理由。\n\n"
-            "【评分细则】\n"
-            f"{standard_answer_rubric.strip()}\n"
-        )
-        if include_word_count:
-            user_prompt = (
-                "【题目类型：整体评估开放题】\n"
-                "- 仅依据评分细则和学生答案给出总分；在 scoring_basis 说明评分理由。\n\n"
-                "【字数要求（必须执行）】\n"
-                "- 必须输出 word_count 与 word_count_confidence（high/medium/low）。\n"
-                "- 若无法可靠估计字数：word_count 填 null，word_count_confidence 置为 low。\n\n"
-                "【输出格式】\n"
-                "只输出JSON对象（不要代码块/解释），必须包含以下键：\n"
-                "student_answer_summary, scoring_basis, itemized_scores, word_count, word_count_confidence\n\n"
-                "【评分细则】\n"
-                f"{standard_answer_rubric.strip()}\n"
-            )
-        return {"system": system_message, "user": user_prompt}
+        ),
+    }
 
-    def select_and_build_prompt(self, standard_answer, question_type, work_mode: Optional[str] = None):
-        """根据题目类型选择并构建相应的Prompt。
+    # 仅识图直评的整体评估题要求输出字数（OCR+评分模式下由文本推算，不要求）
+    _WORD_COUNT_HINT = (
+        "【字数要求（必须执行）】\n"
+        "- 必须输出 word_count 与 word_count_confidence（high/medium/low）。\n"
+        "- 若无法可靠估计字数：word_count 填 null，word_count_confidence 置为 low。\n\n"
+        "【输出格式】\n"
+        "只输出JSON对象（不要代码块/解释），必须包含以下键：\n"
+        "student_answer_summary, scoring_basis, itemized_scores, word_count, word_count_confidence\n\n"
+    )
 
-        返回结构：
-            {"system": <system_message_str>, "user": <user_prompt_str>}
+    def select_and_build_prompt(self, standard_answer, question_type, student_text: Optional[str] = None):
+        """构建评分Prompt，返回 {"system": ..., "user": ...}，评分细则无效时返回 None 并停止阅卷。
 
-        说明：
-        - system 会作为真正的 system role 发送（由 api_service 负责）
-        - user 是评分任务指令文本（非JSON载体），模型输出仍必须为JSON
+        student_text 为 None 表示识图直评（模型直接看图）；否则为OCR识别出的学生答案文本。
+        system 会作为真正的 system role 发送（由 api_service 负责）；模型输出仍必须为JSON。
         """
         # 确保 standard_answer 是字符串类型，如果不是，尝试转换或记录错误
         if not isinstance(standard_answer, str):
             self.log_signal.emit(f"评分细则不是字符串类型 (实际类型: {type(standard_answer)})，尝试转换。", True, "ERROR")
             try:
-                standard_answer = str(standard_answer) # 尝试转换
+                standard_answer = str(standard_answer)
             except Exception as e:
                 error_msg = f"评分细则无法转换为字符串 (错误: {e})，阅卷已暂停，请检查配置并手动处理当前题目。"
                 self.log_signal.emit(error_msg, True, "ERROR")
                 self._set_error_state(error_msg)
-                return None # 中断处理
+                return None
 
-        # 再次检查 standard_answer 是否有效 (可能转换后仍为空或在初始就是空)
-        if not standard_answer or not standard_answer.strip():
+        if not standard_answer.strip():
             error_msg = "评分细则为空，阅卷已暂停，请输入评分细则或手动处理当前题目。"
             self.log_signal.emit(error_msg, True, "ERROR")
             self._set_error_state(error_msg)
-            return None # 中断处理
+            return None
 
+        is_holistic = question_type == "Holistic_Evaluation_Open"
+        is_text_mode = student_text is not None
 
-        if question_type == "Objective_FillInTheBlank": # 更新了类型名称
-            return self._build_objective_fillintheblank_prompt(standard_answer)
-        elif question_type == "Subjective_PointBased_QA":
-            return self._build_subjective_pointbased_prompt(standard_answer)
-        elif question_type == "Formula_Proof_StepBased":
-            return self._build_formula_proof_prompt(standard_answer)
-        elif question_type == "Holistic_Evaluation_Open":
-            direct_modes = {"direct_grade", "direct_grade_thinking"}
-            include_word_count = work_mode in direct_modes if work_mode else False
-            return self._build_holistic_evaluation_prompt(standard_answer, include_word_count=include_word_count)
-        else:
-            return self._build_subjective_pointbased_prompt(standard_answer)
+        system_message = self._get_common_system_message(
+            include_evidence_bar=not is_holistic,
+            source_desc="学生答案文本" if is_text_mode else "图片内容"
+        )
+        user_prompt = self._QUESTION_TYPE_HINTS.get(question_type) or self._QUESTION_TYPE_HINTS["Subjective_PointBased_QA"]
+        if is_text_mode:
+            user_prompt += f"【学生答案文本】\n{student_text}\n\n"
+        elif is_holistic:
+            user_prompt += self._WORD_COUNT_HINT
+        user_prompt += f"【评分细则】\n{standard_answer.strip()}\n"
+        return {"system": system_message, "user": user_prompt}
 
     def _build_ocr_prompt(self) -> dict:
         """构建OCR识别提示词（仅提取文字，不做判断）。"""
@@ -1063,75 +268,6 @@ class GradingThread(QThread):
             "- is_blank: true/false（是否为空白作答）\n"
             "- notes: 备注（可空字符串）\n"
         )
-        return {"system": system_message, "user": user_prompt}
-
-    def _apply_thinking_mode(self, prompt: dict, thinking_type: str) -> dict:
-        """为提示词附加思考模式设置（仅对支持 thinking 的提供商生效）。"""
-        if not isinstance(prompt, dict):
-            return prompt
-        new_prompt = dict(prompt)
-        new_prompt["thinking"] = {"type": thinking_type}
-        return new_prompt
-
-    def select_and_build_text_prompt(self, standard_answer: str, question_type: str, student_answer_text: str, work_mode: Optional[str] = None):
-        """为识评分离模式构建纯文本评分Prompt。"""
-        system_message = self._get_common_system_message(source_desc="学生答案文本")
-        student_text = student_answer_text if student_answer_text is not None else ""
-
-        base_user_prompt = (
-            "【学生答案文本】\n"
-            f"{student_text}\n\n"
-            "【评分细则】\n"
-            f"{standard_answer.strip()}\n"
-        )
-
-        if question_type == "Objective_FillInTheBlank":
-            user_prompt = (
-                "【题目类型：客观填空题】\n"
-                "- 逐空对照评分细则判定得分；若细则允许同义/近义给分，请在 scoring_basis 给出【证据】。\n\n"
-                + base_user_prompt
-            )
-        elif question_type == "Subjective_PointBased_QA":
-            user_prompt = (
-                "【题目类型：按点给分主观题】\n"
-                "- 逐点对照评分细则判定并给分；每点在 scoring_basis 给出【证据】，禁止凭印象补全。\n\n"
-                + base_user_prompt
-            )
-        elif question_type == "Formula_Proof_StepBased":
-            user_prompt = (
-                "【题目类型：公式计算/证明题】\n"
-                "- 按评分细则的步骤/采分点核对：公式、代入、计算/推理、符号等。\n\n"
-                + base_user_prompt
-            )
-        elif question_type == "Holistic_Evaluation_Open":
-            system_message = self._get_common_system_message(include_evidence_bar=False, source_desc="学生答案文本")
-            direct_modes = {"direct_grade", "direct_grade_thinking"}
-            include_word_count = work_mode in direct_modes if work_mode else False
-            if include_word_count:
-                user_prompt = (
-                    "【题目类型：整体评估开放题】\n"
-                    "- 仅依据评分细则和学生答案给出总分；在 scoring_basis 说明评分理由。\n\n"
-                    "【字数要求（必须执行）】\n"
-                    "- 必须输出 word_count 与 word_count_confidence（high/medium/low）。\n"
-                    "- 若无法可靠估计字数：word_count 填 null，word_count_confidence 置为 low。\n\n"
-                    "【输出格式】\n"
-                    "只输出JSON对象（不要代码块/解释），必须包含以下键：\n"
-                    "student_answer_summary, scoring_basis, itemized_scores, word_count, word_count_confidence\n\n"
-                    + base_user_prompt
-                )
-            else:
-                user_prompt = (
-                    "【题目类型：整体评估开放题】\n"
-                    "- 仅依据评分细则和学生答案给出总分；在 scoring_basis 说明评分理由。\n\n"
-                    + base_user_prompt
-                )
-        else:
-            user_prompt = (
-                "【题目类型：按点给分主观题】\n"
-                "- 逐点对照评分细则判定并给分；每点在 scoring_basis 给出【证据】，禁止凭印象补全。\n\n"
-                + base_user_prompt
-            )
-
         return {"system": system_message, "user": user_prompt}
 
     def _process_ocr_response(self, response_text: str) -> Tuple[bool, Union[Tuple[str, str, bool, str], str]]:
@@ -1164,210 +300,87 @@ class GradingThread(QThread):
         except Exception as e:
             return False, str(e)
 
-    def _call_and_process_ocr_api(
-        self,
-        img_str: str,
-        prompt: dict,
-        question_index: int,
-        api_call_func=None,
-        api_name: str = "OCR API",
-        api_key: Optional[str] = None
-    ) -> Tuple[Optional[str], Optional[str], Optional[bool], Optional[str], Optional[str], Optional[str]]:
-        """调用OCR识别API（指定组），解析结果。"""
-        if api_call_func is None:
-            api_call_func = self.api_service.call_first_api
-        def _do_call():
-            response_text, error_from_call = api_call_func(img_str, prompt)
-            if error_from_call or not response_text:
-                raise RuntimeError(error_from_call if error_from_call else "OCR响应为空")
-
+    def _call_and_process_ocr_api(self, api_call_func, img_str: str, prompt: dict, api_name: str, api_key: str):
+        """单次OCR调用并解析。返回 ((extracted_text, readability, is_blank, notes) | None, response_text, error)。"""
+        response_text = None
+        try:
+            response_text, call_error = api_call_func(img_str, prompt)
+            if call_error or not response_text:
+                raise RuntimeError(call_error or "OCR响应为空")
             success, result = self._process_ocr_response(response_text)
             if not success:
-                # OCR JSON 解析错误不重试
                 raise ValueError(f"OCR解析失败: {result}")
-            # 类型窄化：此时 result 必定是 Tuple[str, str, bool, str]
-            extracted_text, readability, is_blank, notes = cast(Tuple[str, str, bool, str], result)
             self._mark_api_success(api_key)
-            return extracted_text, readability, is_blank, notes, response_text, None
-
-        # 直接调用（不内部重试，交叉重试由外层failover统一管理）
-        try:
-            return _do_call()
+            return cast(Tuple[str, str, bool, str], result), response_text, None
         except Exception as e:
             error_msg = str(e)
             if self._is_transient_error(error_msg):
                 self._mark_api_failure(api_key)
-            self.log_signal.emit(f"第{question_index}题OCR识别失败: {error_msg}", True, "ERROR")
-            return None, None, None, None, None, error_msg
+            self.log_signal.emit(f"{api_name}调用失败: {error_msg}", True, "ERROR")
+            return None, response_text, error_msg
 
-    def _call_and_process_ocr_with_failover(
-        self,
-        img_str: str,
-        prompt: dict,
-        question_index: int
-    ) -> Tuple[Optional[str], Optional[str], Optional[bool], Optional[str], Optional[str], Optional[str]]:
-        """识评分离模式OCR阶段的故障转移（与工作模式一保持一致）。"""
-        api_configs = {
-            "first": {
-                "func": self.api_service.call_first_api,
-                "name": "OCR API 1",
-                "other": "second"
-            },
-            "second": {
-                "func": self.api_service.call_second_api,
-                "name": "OCR API 2",
-                "other": "first"
-            }
-        }
+    @staticmethod
+    def _api_label(api_key: str) -> str:
+        return "API 1" if api_key == "first" else "API 2"
 
-        # 交叉重试策略：API1→API2→API1→API2，最多4次
+    def _call_with_failover(self, stage: str, attempt: Callable):
+        """两个API交叉重试（起点→另一个→起点→另一个，共4次），全部失败则停止阅卷并请求人工介入。
+
+        attempt(api_func, api_name, api_key) -> (result, response_text, error)
+        成功后 self.current_api 即为实际使用的API。
+        返回 (result, response_text, error)。
+        """
+        api_funcs = {"first": self.api_service.call_first_api, "second": self.api_service.call_second_api}
+        other_of = {"first": "second", "second": "first"}
+        stopped_msg = "线程已停止（人工介入或用户取消）"
+
+        start = self.current_api
+        sequence = [start, other_of[start]] * 2
+        if self._is_api_in_cooldown(start) and not self._is_api_in_cooldown(other_of[start]):
+            self.log_signal.emit(f"{self._api_label(start)} 处于短期熔断，先使用{self._api_label(other_of[start])}", False, "INFO")
+            sequence = [other_of[start], start] * 2
+
         last_error = None
-        start_api = self.current_api
-        other_start = api_configs[start_api]["other"]
-        api_sequence = [start_api, other_start, start_api, other_start]
+        last_response = ""
+        for idx, api_key in enumerate(sequence):
+            if self._manual_intervention_latched or not self.running:
+                return None, last_response, stopped_msg
 
-        # 首次检查熔断
-        try:
-            if self._is_api_in_cooldown(start_api) and not self._is_api_in_cooldown(other_start):
-                self.log_signal.emit(f"{api_configs[start_api]['name']}处于短期熔断，切换到备用API优先", False, "INFO")
-                api_sequence = [other_start, start_api, other_start, start_api]
-        except Exception:
-            pass
-
-        for attempt_idx, api_key in enumerate(api_sequence):
-            current_config = api_configs[api_key]
-            api_func = current_config["func"]
-            api_name = current_config["name"]
-
-            if attempt_idx > 0:
-                self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 切换到{api_name}重试...", False, "INFO")
+            api_label = self._api_label(api_key)
+            api_name = f"{api_label}({stage})"
+            if idx > 0:
+                self.log_signal.emit(f"第{idx + 1}次尝试：切换到{api_name}重试...", False, "INFO")
                 time.sleep(1.0)
-
             self.current_api = api_key
-            self.log_signal.emit(f"使用{api_name}进行OCR识别...", False, "INFO")
+            self.log_signal.emit(f"使用{api_label}进行{stage}...", False, "INFO")
 
-            extracted_text, readability, is_blank, notes, response_text, error = self._call_and_process_ocr_api(
-                img_str,
-                prompt,
-                question_index,
-                api_call_func=api_func,
-                api_name=api_name,
-                api_key=api_key
-            )
+            result, response_text, error = attempt(api_funcs[api_key], api_name, api_key)
+            last_response = response_text or last_response
 
             if not self.running:
-                return None, None, None, None, response_text, "线程已停止（人工介入或用户取消）"
+                return None, last_response, stopped_msg
 
             if not error:
-                self.last_used_ocr_api = api_key
-                if attempt_idx > 0:
-                    self.log_signal.emit(f"{api_name}第{attempt_idx + 1}次尝试OCR成功", False, "INFO")
-                return extracted_text, readability, is_blank, notes, response_text, None
+                if idx > 0:
+                    self.log_signal.emit(f"{api_name}第{idx + 1}次尝试成功", False, "INFO")
+                return result, response_text, None
 
             last_error = error
-            self.log_signal.emit(f"{api_name} OCR失败（第{attempt_idx + 1}/4次尝试）", False, "WARNING")
-
-        # ── 4次全部失败后的处理：立即停止，等待人工介入 ──
-        self._stop_grading(
-            reason=StopReason.API_ERROR,
-            message="两个AI接口交叉重试均失败，请检查网络或密钥配置",
-            detail="请检查: 1)网络连接 2)API密钥 3)模型ID",
-            emit_signal=False
-        )
-        self.manual_intervention_signal.emit(
-            "两个AI接口交叉重试均失败",
-            "请检查: 1)网络连接 2)API密钥 3)模型ID",
-            ""
-        )
-        return None, None, None, None, "", "两个AI接口均失败"
-
-    def _call_and_process_text_grading_with_failover(self, text_prompt: dict, q_config: dict, question_index: int):
-        """工作模式二评分阶段的故障转移（与工作模式一保持一致）。"""
-        api_configs = {
-            "first": {
-                "func": self.api_service.call_first_api,
-                "name": "API 1(评分)",
-                "other": "second"
-            },
-            "second": {
-                "func": self.api_service.call_second_api,
-                "name": "API 2(评分)",
-                "other": "first"
-            }
-        }
-
-        # 交叉重试策略：API1→API2→API1→API2，最多4次
-        last_error = None
-        last_response_text = ""
-        start_api = self.current_api
-        other_start = api_configs[start_api]["other"]
-        api_sequence = [start_api, other_start, start_api, other_start]
-
-        # 首次检查熔断
-        try:
-            if self._is_api_in_cooldown(start_api) and not self._is_api_in_cooldown(other_start):
-                self.log_signal.emit(f"{api_configs[start_api]['name']}处于短期熔断，切换到备用API优先", False, "INFO")
-                api_sequence = [other_start, start_api, other_start, start_api]
-        except Exception:
-            pass
-
-        for attempt_idx, api_key in enumerate(api_sequence):
-            if self._manual_intervention_latched or not self.running:
-                return None, None, None, None, last_response_text, "线程已停止（人工介入或用户取消）"
-
-            current_config = api_configs[api_key]
-            api_func = current_config["func"]
-            api_name = current_config["name"]
-
-            if attempt_idx > 0:
-                self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 切换到{api_name}重试...", False, "INFO")
-                time.sleep(1.0)
-
-            self.current_api = api_key
-            self.log_signal.emit(f"使用{api_name}进行评分...", False, "INFO")
-
-            score, reasoning, itemized_scores, confidence, response_text, error = self._call_and_process_single_api(
-                api_func,
-                "",
-                text_prompt,
-                q_config,
-                api_name=api_name,
-                api_key=api_key
-            )
-            last_response_text = response_text or last_response_text
-
-            if not self.running:
-                return None, None, None, None, last_response_text, "线程已停止（人工介入或用户取消）"
-
-            if not error:
-                self.last_used_api = api_key
-                if attempt_idx > 0:
-                    self.log_signal.emit(f"{api_name}第{attempt_idx + 1}次尝试评分成功", False, "INFO")
-                return score, reasoning, itemized_scores, confidence, response_text, None
-
-            if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入", "需要人工介入"]):
-                last_error = error
-                ai_reason = error
-                for prefix in ["需人工介入: ", "需人工介入：", "需要人工介入: ", "需要人工介入："]:
-                    if isinstance(ai_reason, str) and ai_reason.startswith(prefix):
-                        ai_reason = ai_reason[len(prefix):].strip()
-                        break
-                self.log_signal.emit(f"{api_name}请求人工介入，已首触发立即停止", False, "WARNING")
+            # 人工介入请求：首次出现即停止，不再交叉重试
+            if isinstance(error, str) and "人工介入" in error:
+                reason = re.sub(r"^需(?:要)?人工介入[:：]\s*", "", error).strip()
+                self.log_signal.emit(f"{api_name}请求人工介入，已立即停止", False, "WARNING")
                 self._stop_grading(
                     reason=StopReason.MANUAL_INTERVENTION,
-                    message=ai_reason,
+                    message=reason,
                     detail="",
                     emit_signal=True,
                     log_level="WARNING"
                 )
-                return None, None, None, None, last_response_text, error
+                return None, last_response, error
 
-            last_error = error
-            self.log_signal.emit(f"{api_name}评分失败（第{attempt_idx + 1}/4次尝试）", False, "WARNING")
+            self.log_signal.emit(f"{api_name}失败（第{idx + 1}/{len(sequence)}次尝试）", False, "WARNING")
 
-        # ── 4次交叉重试全部失败后的处理 ──
-
-        # 普通API故障（网络/限流/服务不可用）：立即停止，等待人工介入
         self._stop_grading(
             reason=StopReason.API_ERROR,
             message="两个AI接口交叉重试均失败，请检查网络或密钥配置",
@@ -1379,50 +392,36 @@ class GradingThread(QThread):
             "请检查: 1)网络连接 2)API密钥 3)模型ID",
             ""
         )
-        return None, None, None, None, "", f"评分失败（已交叉重试4次）: {last_error}"
+        return None, last_response, f"两个AI接口均失败（已交叉重试{len(sequence)}次）: {last_error}"
 
-        # 仅在“完全无法识别 + 无有效答案/内容”这类高置信场景触发。
-        # 注意：避免把“部分看不清/部分无法识别”当成整题无法识别。
-        strong_keywords = [
-            "完全无法识别", "字迹完全无法辨认", "图片内容完全无法识别",
-            "完全看不清", "全部无法识别"
-        ]
+    def _ocr_with_failover(self, img_str: str, prompt: dict):
+        """OCR识别（含故障转移）。返回 (ocr_result | None, response_text, error)。"""
+        result, response_text, error = self._call_with_failover(
+            "OCR识别",
+            lambda fn, name, key: self._call_and_process_ocr_api(fn, img_str, prompt, name, key)
+        )
+        if not error:
+            self.last_used_ocr_api = self.current_api
+        return result, response_text, error
 
-        summary_lower = student_answer_summary.lower()
-        if "部分" in summary_lower or "局部" in summary_lower:
-            return False
+    def _grade_with_failover(self, img_str: str, prompt: dict, q_config: dict):
+        """评分（含故障转移，img_str 为空时为纯文本评分）。
+        返回 ((score, reasoning, itemized_scores, confidence) | None, response_text, error)。"""
+        def attempt(fn, name, key):
+            score, reasoning, itemized, confidence, response_text, error = self._call_and_process_single_api(
+                fn, img_str, prompt, q_config, api_name=name, api_key=key
+            )
+            return (score, reasoning, itemized, confidence), response_text, error
 
-        has_strong = any(k in summary_lower for k in strong_keywords)
-        if not has_strong:
-            return False
-
-        basis_lower = (scoring_basis or "").lower()
-        has_no_effective = any(k in summary_lower or k in basis_lower for k in [
-            "无有效", "无有效内容", "无可评分", "未检测到可评分"
-        ])
-
-        all_zero = False
-        if itemized_scores and isinstance(itemized_scores, list):
-            all_zero = all(score == 0 for score in itemized_scores)
-
-        if has_no_effective or all_zero:
-            return True
-
-        return False
+        result, response_text, error = self._call_with_failover("评分", attempt)
+        if not error:
+            self.last_used_api = self.current_api
+        return result, response_text, error
 
     def _get_grading_policy(self, field_name: str, default_value: str) -> str:
         """从ConfigManager读取阅卷判定策略。"""
-        try:
-            cm = getattr(self.api_service, 'config_manager', None)
-            if cm is None:
-                return default_value
-            v = getattr(cm, field_name, default_value)
-            v = str(v).strip().lower() if v is not None else default_value
-            if v not in {"zero", "manual"}:
-                return default_value
-            return v
-        except Exception:
-            return default_value
+        v = str(getattr(self.config_manager, field_name, default_value) or default_value).strip().lower()
+        return v if v in {"zero", "manual"} else default_value
 
     def _detect_blank_answer_feedback(self, student_answer_summary: str, scoring_basis: str) -> Optional[str]:
         """检测空白/未作答。
@@ -1612,7 +611,7 @@ class GradingThread(QThread):
                 try:
                     if hasattr(resource, 'close'):
                         resource.close()
-                except:
+                except Exception:
                     pass
             self._temp_resources.clear()
         except Exception as e:
@@ -1664,7 +663,7 @@ class GradingThread(QThread):
             if current >= int(self._api_failure_threshold):
                 self._api_cooldown_until[api_key] = time.time() + float(self._api_cooldown_seconds)
                 self.log_signal.emit(
-                    f"{api_key.upper()} 连续失败{current}次，进入{self._api_cooldown_seconds}s短期熔断",
+                    f"{self._api_label(api_key)} 连续失败{current}次，进入{self._api_cooldown_seconds}s短期熔断",
                     False, "WARNING"
                 )
         except Exception:
@@ -1788,7 +787,7 @@ class GradingThread(QThread):
             try:
                 from PyQt5.QtCore import Qt
                 self.log_signal.emit(log_msg, True, log_level)
-            except:
+            except Exception:
                 # 如果信号发送失败，仍然保证状态已正确设置
                 pass
 
@@ -1872,7 +871,7 @@ class GradingThread(QThread):
             if emit_signal and message:
                 try:
                     self.log_signal.emit(message, reason != StopReason.COMPLETED, log_level)
-                except:
+                except Exception:
                     pass
         
         # 在锁外发送特定 UI 信号（避免长时间持有锁）
@@ -2082,9 +1081,7 @@ class GradingThread(QThread):
 
         # 获取工作模式
         work_mode = q_config.get('work_mode', 'direct_grade')
-        is_split_mode = work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'}
-        ocr_thinking_enabled = work_mode == 'ocr_then_grade_dual_thinking'
-        grade_thinking_enabled = work_mode in {'direct_grade_thinking', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'}
+        is_split_mode = work_mode == 'ocr_then_grade'
         ocr_text = None
         ocr_raw_response = None
 
@@ -2099,19 +1096,15 @@ class GradingThread(QThread):
         if is_split_mode:
             if dual_evaluation:
                 self.log_signal.emit(
-                    f"第 {question_index} 题为识评分离模式，已自动忽略双评设置",
+                    f"第 {question_index} 题为OCR+评分模式，已自动忽略双评设置",
                     True,
                     "WARNING"
                 )
-            ocr_prompt = self._build_ocr_prompt()
-            ocr_prompt = self._apply_thinking_mode(
-                ocr_prompt,
-                "enabled" if ocr_thinking_enabled else "disabled"
-            )
-            ocr_result = self._call_and_process_ocr_with_failover(img_str, ocr_prompt, question_index)
-            extracted_text, readability, is_blank, notes, ocr_raw_response, ocr_error = ocr_result
+            ocr_result, ocr_raw_response, ocr_error = self._ocr_with_failover(img_str, self._build_ocr_prompt())
 
-            if ocr_error:
+            if ocr_error or ocr_result is None:
+                if not self.running:
+                    return False
                 self._set_error_state(
                     BusinessError(
                         f"第 {question_index} 题OCR识别失败：{ocr_error}",
@@ -2120,6 +1113,7 @@ class GradingThread(QThread):
                     )
                 )
                 return False
+            extracted_text, readability, is_blank, notes = ocr_result
 
             # 系统标记的"图片异常"文本：无法自动处理，立即停止等待人工介入
             if self._is_anomaly_label_text(extracted_text):
@@ -2150,24 +1144,15 @@ class GradingThread(QThread):
                 )
                 return False
             else:
-                ocr_text = extracted_text if extracted_text is not None else ""
+                ocr_text = extracted_text
 
-                text_prompt_for_api = self.select_and_build_text_prompt(standard_answer, question_type, ocr_text, work_mode)
+                text_prompt_for_api = self.select_and_build_prompt(standard_answer, question_type, ocr_text)
                 if text_prompt_for_api is None:
                     return self.running
 
-                text_prompt_for_api = self._apply_thinking_mode(
-                    text_prompt_for_api,
-                    "enabled" if grade_thinking_enabled else "disabled"
-                )
+                grade_result, raw_ai_response, error_info = self._grade_with_failover("", text_prompt_for_api, q_config)
 
-                score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response, error_info = self._call_and_process_text_grading_with_failover(
-                    text_prompt_for_api,
-                    q_config,
-                    question_index
-                )
-
-                if error_info:
+                if error_info or grade_result is None:
                     if not self.running:
                         return False
                     self._set_error_state(
@@ -2179,16 +1164,11 @@ class GradingThread(QThread):
                     )
                     return False
 
-                eval_result = (score, reasoning_data, itemized_scores_data, confidence_data, raw_ai_response)
+                eval_result = (*grade_result, raw_ai_response)
         else:
-            text_prompt_for_api = self.select_and_build_prompt(standard_answer, question_type, work_mode)
+            text_prompt_for_api = self.select_and_build_prompt(standard_answer, question_type)
             if text_prompt_for_api is None:
                 return self.running  # 如果running为False则停止，否则继续下一题
-
-            text_prompt_for_api = self._apply_thinking_mode(
-                text_prompt_for_api,
-                "enabled" if grade_thinking_enabled else "disabled"
-            )
 
             eval_result = self.evaluate_answer(
                 img_str, text_prompt_for_api, q_config, dual_evaluation, score_diff_threshold
@@ -2355,7 +1335,7 @@ class GradingThread(QThread):
             # 在锁内发送信号，确保状态和信号的原子性
             try:
                 self.log_signal.emit(log_msg, True, log_level)
-            except:
+            except Exception:
                 pass  # 如果信号发送失败，仍然保证状态已正确设置
         
         # 网络错误提供重试建议（不再自动重试，等待人工判断是否重新开始）
@@ -2385,7 +1365,7 @@ class GradingThread(QThread):
         except Exception as cleanup_error:
             try:
                 self.log_signal.emit(f"资源清理失败: {str(cleanup_error)}", False, "WARNING")
-            except:
+            except Exception:
                 pass
         
         # 生成汇总记录
@@ -2713,7 +1693,7 @@ class GradingThread(QThread):
                 if screenshot:
                     try:
                         screenshot.close()
-                    except:
+                    except Exception:
                         pass
                     screenshot = None
                 raise  # 重新抛出异常供统一重试机制处理
@@ -2762,17 +1742,17 @@ class GradingThread(QThread):
         # 双评：决定是否并发
         # - provider 相同：保持串行（降低触发限流/风控概率）
         # - provider 不同：并发调用（降低总耗时），并对第二个请求增加200-500ms随机延迟，避免同时起飞
-        first_provider = None
-        second_provider = None
-        try:
-            cm = getattr(self.api_service, 'config_manager', None)
-            first_provider = getattr(cm, 'first_api_provider', None) if cm else None
-            second_provider = getattr(cm, 'second_api_provider', None) if cm else None
-        except Exception:
-            first_provider = None
-            second_provider = None
-
+        cm = self.config_manager
+        first_provider = getattr(cm, 'first_api_provider', None)
+        second_provider = getattr(cm, 'second_api_provider', None)
         providers_same = bool(first_provider and second_provider and str(first_provider) == str(second_provider))
+
+        def _call_api(api_key: str):
+            api_func = self.api_service.call_first_api if api_key == "first" else self.api_service.call_second_api
+            return self._call_and_process_single_api(
+                api_func, img_str, prompt, current_question_config,
+                api_name=f"{self._api_label(api_key)}(评分)", api_key=api_key
+            )
 
         if providers_same:
             self.log_signal.emit(
@@ -2780,26 +1760,12 @@ class GradingThread(QThread):
                 False, "DETAIL"
             )
 
-            score1, reasoning1, scores1, confidence1, response_text1, error1 = self._call_and_process_single_api(
-                self.api_service.call_first_api,
-                img_str,
-                prompt,
-                current_question_config,
-                api_name="第一个API",
-                api_key="first"
-            )
+            score1, reasoning1, scores1, confidence1, response_text1, error1 = _call_api("first")
             if error1:
                 self._set_error_state(error1)
                 return None, error1, None, None, ""
 
-            score2, reasoning2, scores2, confidence2, response_text2, error2 = self._call_and_process_single_api(
-                self.api_service.call_second_api,
-                img_str,
-                prompt,
-                current_question_config,
-                api_name="第二个API",
-                api_key="second"
-            )
+            score2, reasoning2, scores2, confidence2, response_text2, error2 = _call_api("second")
         else:
             jitter_delay = random.uniform(0.2, 0.5)
             self.log_signal.emit(
@@ -2807,29 +1773,12 @@ class GradingThread(QThread):
                 False, "DETAIL"
             )
 
-            def _call_api1():
-                return self._call_and_process_single_api(
-                    self.api_service.call_first_api,
-                    img_str,
-                    prompt,
-                    current_question_config,
-                    api_name="第一个API",
-                    api_key="first"
-                )
-
             def _call_api2_with_delay():
                 time.sleep(jitter_delay)
-                return self._call_and_process_single_api(
-                    self.api_service.call_second_api,
-                    img_str,
-                    prompt,
-                    current_question_config,
-                    api_name="第二个API",
-                    api_key="second"
-                )
+                return _call_api("second")
 
             with ThreadPoolExecutor(max_workers=2) as executor:
-                future1 = executor.submit(_call_api1)
+                future1 = executor.submit(_call_api, "first")
                 future2 = executor.submit(_call_api2_with_delay)
                 score1, reasoning1, scores1, confidence1, response_text1, error1 = future1.result()
                 score2, reasoning2, scores2, confidence2, response_text2, error2 = future2.result()
@@ -2858,145 +1807,22 @@ class GradingThread(QThread):
 
         # 双评模式成功时，合并两次API的原始响应
         self.last_used_api = "dual"
-        combined_raw_response = f"API1:\n{response_text1}\n\nAPI2:\n{response_text2}"
+        combined_raw_response = f"API 1:\n{response_text1}\n\nAPI 2:\n{response_text2}"
         return final_score, combined_reasoning, combined_scores, combined_confidence, combined_raw_response
 
     def _evaluate_with_failover(self, img_str, prompt, current_question_config):
+        """单评：带故障转移的评分，成功后交替使用另一个API以降低限流风险。
+
+        返回格式与 evaluate_answer 相同。
         """
-        带故障转移的答案评估（单评模式专用）。
+        result, response_text, error = self._grade_with_failover(img_str, prompt, current_question_config)
+        if error or result is None:
+            return None, error, None, None, response_text
 
-        工作流程：
-        1. 使用当前活跃的API（self.current_api）进行评分
-        2. 如果成功：继续使用此API
-        3. 如果失败：切换到另一个API重试（最多4次交叉）
-        4. 如果4次均失败：立即停止，发出人工介入信号，等待人工处理（不做自动重试/自动给分）
-
-        说明：不分主次API，哪个API在运行就用哪个，失败后自动切换到另一个
-
-        Returns:
-            与 evaluate_answer 相同的返回格式
-        """
-        # API配置
-        api_configs = {
-            "first": {
-                "func": self.api_service.call_first_api,
-                "name": "API 1",
-                "other": "second"
-            },
-            "second": {
-                "func": self.api_service.call_second_api,
-                "name": "API 2",
-                "other": "first"
-            }
-        }
-
-        # 交叉重试策略：API1→API2→API1→API2，最多4次
-        last_error = None
-        last_response_text = ""
-        start_api = self.current_api
-
-        # 构建交叉序列：从当前API开始交替
-        other_start = api_configs[start_api]["other"]
-        api_sequence = [start_api, other_start, start_api, other_start]
-
-        for attempt_idx, api_key in enumerate(api_sequence):
-            if self._manual_intervention_latched or not self.running:
-                return None, "线程已停止（人工介入或用户取消）", None, None, last_response_text
-
-            current_config = api_configs[api_key]
-            api_func = current_config["func"]
-            api_name = current_config["name"]
-
-            # 首次尝试时检查熔断，仅在第一轮做一次切换判断
-            if attempt_idx == 0:
-                try:
-                    other_api = current_config["other"]
-                    if self._is_api_in_cooldown(api_key) and not self._is_api_in_cooldown(other_api):
-                        self.log_signal.emit(f"{api_name}处于短期熔断，切换到备用API优先", False, "INFO")
-                        # 反转整个序列
-                        api_sequence = [other_api, api_key, other_api, api_key]
-                        api_key = api_sequence[0]
-                        current_config = api_configs[api_key]
-                        api_func = current_config["func"]
-                        api_name = current_config["name"]
-                except Exception:
-                    pass
-
-            # 第2次及以后的重试，先短暂等待（交叉切换天然提供冷却）
-            if attempt_idx > 0:
-                # 普通失败：短暂等待1秒后切换API重试
-                self.log_signal.emit(f"第{attempt_idx + 1}次尝试: 切换到{api_name}重试...", False, "INFO")
-                time.sleep(1.0)
-
-            self.log_signal.emit(f"使用{api_name}进行评分...", False, "INFO")
-            self.current_api = api_key
-
-            # 调用API
-            score, reasoning, scores, confidence, response_text, error = self._call_and_process_single_api(
-                api_func,
-                img_str,
-                prompt,
-                current_question_config,
-                api_name=api_name,
-                api_key=api_key
-            )
-            last_response_text = response_text or last_response_text
-
-            # 调用API后检查线程状态
-            if not self.running:
-                self.log_signal.emit("检测到线程已停止，退出API交叉重试循环", False, "INFO")
-                return None, "线程已停止（人工介入或用户取消）", None, None, last_response_text
-
-            if not error:
-                # 成功
-                if attempt_idx > 0:
-                    self.log_signal.emit(f"{api_name}第{attempt_idx + 1}次尝试评分成功", False, "INFO")
-                else:
-                    self.log_signal.emit(f"{api_name}评分成功", False, "INFO")
-                self.last_used_api = api_key
-                # 每次成功后交替切换到另一个API，降低限流风险、提升效率
-                other_api = api_configs[api_key]["other"]
-                self.current_api = other_api
-                self.log_signal.emit(f"下一张将使用 {api_configs[other_api]['name']} 评分（交替策略）", False, "DETAIL")
-                return score, reasoning, scores, confidence, response_text
-
-            # 人工介入信号：首触发即停（锁存），不再继续交叉重试
-            if isinstance(error, str) and any(k in error for k in ["人工介入", "需人工介入", "需要人工介入"]):
-                last_error = error
-                ai_reason = error
-                for prefix in ["需人工介入: ", "需人工介入：", "需要人工介入: ", "需要人工介入："]:
-                    if isinstance(ai_reason, str) and ai_reason.startswith(prefix):
-                        ai_reason = ai_reason[len(prefix):].strip()
-                        break
-                self.log_signal.emit(f"{api_name}请求人工介入，已首触发立即停止", False, "WARNING")
-                self._stop_grading(
-                    reason=StopReason.MANUAL_INTERVENTION,
-                    message=ai_reason,
-                    detail="",
-                    emit_signal=True,
-                    log_level="WARNING"
-                )
-                return None, error, None, None, last_response_text
-
-            # 普通失败：记录错误，继续交叉重试
-            last_error = error
-            self.log_signal.emit(f"{api_name}失败（第{attempt_idx + 1}/4次尝试）", False, "WARNING")
-
-        # ── 4次交叉重试全部失败后的处理 ──
-
-        # 普通API故障（网络/限流/服务不可用）：立即停止，等待人工介入
-        self._stop_grading(
-            reason=StopReason.API_ERROR,
-            message="两个AI接口交叉重试均失败，请检查网络或密钥配置",
-            detail="请检查: 1)网络连接 2)API密钥 3)模型ID",
-            emit_signal=False
-        )
-        self.manual_intervention_signal.emit(
-            "两个AI接口交叉重试均失败",
-            "请检查: 1)网络连接 2)API密钥 3)模型ID",
-            ""
-        )
-        return None, "两个AI接口均失败", None, None, last_response_text
+        other_api = "second" if self.current_api == "first" else "first"
+        self.log_signal.emit(f"下一张将使用 API {1 if other_api == 'first' else 2} 评分（交替策略）", False, "DETAIL")
+        self.current_api = other_api
+        return (*result, response_text)
 
     def _call_and_process_single_api(self, api_call_func, img_str, prompt, q_config, api_name="API", max_retries=2, api_key: Optional[str] = None):
         """
@@ -3098,7 +1924,7 @@ class GradingThread(QThread):
         score2, reasoning2, itemized_scores2, confidence2, response_text2 = result2
 
         score_diff = abs(score1 - score2)
-        self.log_signal.emit(f"API-1得分: {score1}, API-2得分: {score2}, 分差: {score_diff}", False, "INFO")
+        self.log_signal.emit(f"API 1得分: {score1}, API 2得分: {score2}, 分差: {score_diff}", False, "INFO")
 
         if score_diff > score_diff_threshold:
             error_msg = f"双评分差过大: {score_diff:.2f} > {score_diff_threshold}"
@@ -3180,8 +2006,7 @@ class GradingThread(QThread):
             question_type = current_question_config.get('question_type', 'Subjective_PointBased_QA')
             work_mode = current_question_config.get('work_mode', 'direct_grade')
             is_holistic = question_type == "Holistic_Evaluation_Open"
-            is_direct_mode = work_mode in {"direct_grade", "direct_grade_thinking"}
-            is_holistic_direct = is_holistic and is_direct_mode
+            is_holistic_direct = is_holistic and work_mode == 'direct_grade'
 
             required_fields = ["student_answer_summary", "scoring_basis", "itemized_scores"]
 
@@ -3386,22 +2211,15 @@ class GradingThread(QThread):
 
             # 合并展示：总分 + 评分依据（首行作为UI标题）
             work_mode = current_question_config.get('work_mode', 'direct_grade')
-            mode_label_map = {
-                'direct_grade': "直评",
-                'direct_grade_thinking': "直评+推理",
-                'ocr_then_grade': "分离",
-                'ocr_then_grade_thinking': "分离+推理",
-                'ocr_then_grade_dual_thinking': "分离+双推理"
-            }
-            mode_label = mode_label_map.get(work_mode, "直评")
+            mode_label = "OCR+评分" if work_mode == 'ocr_then_grade' else "AI识图直评"
             api_label = ""
             api_source = self._current_response_api or self.last_used_api
             if api_source == "dual":
-                api_label = " - AI 1/AI 2"
+                api_label = " - API 1/API 2"
             elif api_source == "second":
-                api_label = " - AI 2"
+                api_label = " - API 2"
             else:
-                api_label = " - AI 1"
+                api_label = " - API 1"
             import datetime as _dt
             _score_time = _dt.datetime.now().strftime("%H:%M:%S")
             header = f"【 总分 {final_score} 分 - {mode_label}{api_label} - {_score_time} 】"
@@ -3832,6 +2650,7 @@ class GradingThread(QThread):
             
 
             # 1. 构建基础记录字典
+            is_ocr_mode = work_mode == 'ocr_then_grade'
             record = {
                 'timestamp': datetime.datetime.now().strftime('%Y年%m月%d日_%H点%M分%S秒'),
                 'record_type': 'detail',
@@ -3841,20 +2660,12 @@ class GradingThread(QThread):
                 'total_questions_in_run': self.total_question_count_in_run,
                 'scoring_rubric_summary': scoring_rubric_summary,
                 'work_mode': work_mode,
-                'work_mode_display': {
-                    'direct_grade': '识图直评',
-                    'direct_grade_thinking': '直评+推理',
-                    'ocr_then_grade': '识评分离',
-                    'ocr_then_grade_thinking': '分离+推理',
-                    'ocr_then_grade_dual_thinking': '分离+双推理'
-                }.get(work_mode, '识图直评'),
+                'work_mode_display': 'OCR+评分' if is_ocr_mode else 'AI识图直评',
                 'ocr_text': ocr_text if ocr_text is not None else "",
                 'ocr_raw_response': ocr_raw_response if ocr_raw_response is not None else "",
                 'ocr_model_id': (
-                    self.second_model_id
-                    if work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'} and getattr(self, 'last_used_ocr_api', 'first') == 'second'
-                    else (self.first_model_id if work_mode in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'} else "")
-                ),
+                    self.second_model_id if self.last_used_ocr_api == 'second' else self.first_model_id
+                ) if is_ocr_mode else "",
             }
 
             if isinstance(confidence_data, dict):
@@ -3909,7 +2720,7 @@ class GradingThread(QThread):
                     'sub_scores': str(itemized_scores_data) if itemized_scores_data is not None else "AI未提供",
                     'raw_ai_response': raw_ai_response if raw_ai_response is not None else "AI未提供",
                     'grade_model_id': used_model_id,
-                    'api_label': 'AI 2' if self.last_used_api == "second" else 'AI 1',
+                    'api_label': 'API 2' if self.last_used_api == "second" else 'API 1',
                 })
 
             else:

@@ -62,6 +62,7 @@ from ui_components.main_window import MainWindow
 from api_service import ApiService
 from config_manager import ConfigManager
 from auto_thread import GradingThread
+from grading_support import classify_teacher_facing_error, TeacherErrorCategory
 import winsound
 import traceback
 import pandas as pd
@@ -407,21 +408,18 @@ class Application:
     def _simplify_for_teacher(self, text: str) -> str:
         """把底层错误压缩成老师能看懂的一句话 + 建议。"""
         t = (text or "").strip()
-        low = t.lower()
-        if any(k in low for k in ["timed out", "timeout"]):
-            return "网络可能不稳定（连接超时）。建议：检查网络，稍等再试。"
-        if any(k in low for k in ["401", "unauthorized", "invalid api key"]):
-            return "密钥可能不正确或已失效。建议：重新复制密钥再试。"
-        if any(k in low for k in ["403", "forbidden", "quota", "余额", "payment", "insufficient"]):
-            return "账号可能没有权限或余额/额度不足。建议：检查账号余额/额度。"
-        if any(k in low for k in ["429", "rate limit", "too many"]):
-            return "请求太频繁，平台临时限制。建议：等10~30秒再试。"
-        if any(k in low for k in ["502", "503", "504", "service unavailable", "bad gateway"]):
-            return "平台服务繁忙或临时不可用。建议：稍后再试或换备用平台。"
-        if any(k in low for k in ["permission", "access is denied", "被占用", "正在使用"]):
-            return "文件可能被占用或没有写入权限。建议：关闭Excel后再试。"
-        if not t:
-            return "发生了错误，但没有收到具体原因。"
+        messages = {
+            TeacherErrorCategory.TIMEOUT: "网络可能不稳定（连接超时）。建议：检查网络，稍等再试。",
+            TeacherErrorCategory.AUTH_401: "密钥可能不正确或已失效。建议：重新复制密钥再试。",
+            TeacherErrorCategory.QUOTA_403: "账号可能没有权限或余额/额度不足。建议：检查账号余额/额度。",
+            TeacherErrorCategory.RATE_LIMIT_429: "请求太频繁，平台临时限制。建议：等10~30秒再试。",
+            TeacherErrorCategory.SERVICE_5XX: "平台服务繁忙或临时不可用。建议：稍后再试或换备用平台。",
+            TeacherErrorCategory.FILE_PERMISSION: "文件可能被占用或没有写入权限。建议：关闭Excel后再试。",
+            TeacherErrorCategory.EMPTY: "发生了错误，但没有收到具体原因。",
+        }
+        category = classify_teacher_facing_error(t)
+        if category in messages:
+            return messages[category]
         return f"发生了错误：{t[:80]}{'…' if len(t) > 80 else ''}"
 
     def _setup_global_exception_hook(self):
@@ -782,9 +780,6 @@ class Application:
         # 将配置加载到UI
         self.main_window.load_config_to_ui()
 
-        # 更新API服务的配置
-        self.api_service.update_config_from_manager()
-
         self.main_window.log_message("配置已成功加载并应用。")
 
     def _get_excel_filepath(self, record_data, worker=None):
@@ -848,6 +843,29 @@ class Application:
         excel_filepath = date_dir / excel_filename
 
         return excel_filepath
+
+    @staticmethod
+    def _write_excel_with_formatting(combined_df, excel_filepath, column_widths, bold_header=False):
+        """写入Excel并统一设置列宽/自动换行(可选标题加粗)，供详细记录和汇总记录共用。"""
+        with pd.ExcelWriter(excel_filepath, engine='openpyxl') as writer:
+            combined_df.to_excel(writer, index=False, sheet_name='阅卷记录')
+            worksheet = writer.sheets['阅卷记录']
+
+            for col, width in column_widths.items():
+                if col in worksheet.column_dimensions:
+                    worksheet.column_dimensions[col].width = width
+
+            from openpyxl.styles import Alignment
+            wrap_alignment = Alignment(wrap_text=True, vertical='top')
+            for row in worksheet.iter_rows():
+                for cell in row:
+                    cell.alignment = wrap_alignment
+
+            if bold_header:
+                from openpyxl.styles import Font
+                header_font = Font(bold=True)
+                for cell in worksheet[1]:
+                    cell.font = header_font
 
     def _save_summary_record(self, record_data):
         """保存汇总记录到对应的Excel文件
@@ -919,31 +937,7 @@ class Application:
             else:
                 combined_df = pd.DataFrame([summary_data], columns=["汇总信息"])
 
-            # 写入Excel文件
-            with pd.ExcelWriter(excel_filepath, engine='openpyxl') as writer:
-                combined_df.to_excel(writer, index=False, sheet_name='阅卷记录')
-
-                # 获取工作簿和工作表
-                workbook = writer.book
-                worksheet = writer.sheets['阅卷记录']
-
-                # 设置列宽
-                column_widths = {
-                    'A': 80,  # 汇总信息列
-                }
-
-                for col, width in column_widths.items():
-                    if col in worksheet.column_dimensions:
-                        worksheet.column_dimensions[col].width = width
-
-                # 设置自动换行
-                from openpyxl.styles import Alignment
-                wrap_alignment = Alignment(wrap_text=True, vertical='top')
-
-                for row in worksheet.iter_rows():
-                    for cell in row:
-                        cell.alignment = wrap_alignment
-
+            self._write_excel_with_formatting(combined_df, excel_filepath, {'A': 80})
             self.main_window.log_message(f"已保存汇总记录到: {excel_filename}")
             return excel_filepath
 
@@ -997,13 +991,13 @@ class Application:
                 ocr_text = record_data.get('ocr_text', '')
                 ocr_model_id = record_data.get('ocr_model_id', '')
                 row1 = [question_index_str,
-                       "API-1",
+                       "API 1",
                        str(record_data.get('score_diff_threshold', "未提供")),
                        record_data.get('api1_student_answer_summary', '未提供'),
                        work_mode_display,
                        ocr_text,
                        ocr_model_id,
-                       f"AI 1\n\n模型{record_data.get('api1_model_id', '未指定')}",
+                       f"API 1\n\n模型{record_data.get('api1_model_id', '未指定')}",
                        str(record_data.get('api1_itemized_scores', [])),
                        _format_basis_with_newlines(record_data.get('api1_scoring_basis', '未提供')),
                        str(record_data.get('api1_raw_score', 0.0)),
@@ -1011,13 +1005,13 @@ class Application:
                        final_total_score_str,
                        rubric_str]
                 row2 = [question_index_str,
-                       "API-2",
+                       "API 2",
                        str(record_data.get('score_diff_threshold', "未提供")),
                        record_data.get('api2_student_answer_summary', '未提供'),
                        work_mode_display,
                        ocr_text,
                        ocr_model_id,
-                       f"AI 2\n\n模型{record_data.get('api2_model_id', '未指定')}",
+                       f"API 2\n\n模型{record_data.get('api2_model_id', '未指定')}",
                        str(record_data.get('api2_itemized_scores', [])),
                        _format_basis_with_newlines(record_data.get('api2_scoring_basis', '未提供')),
                        str(record_data.get('api2_raw_score', 0.0)),
@@ -1032,7 +1026,7 @@ class Application:
                 ocr_text = record_data.get('ocr_text', '')
                 ocr_model_id = record_data.get('ocr_model_id', '')
                 grade_model_id = record_data.get('grade_model_id', record_data.get('first_model_id', '未指定'))
-                api_label_display = record_data.get('api_label', 'AI 1')
+                api_label_display = record_data.get('api_label', 'API 1')
                 model_display = f"{api_label_display}\n\n模型{grade_model_id}"
                 single_row = [question_index_str,
                              record_data.get('student_answer', '无法提取'),
@@ -1059,50 +1053,23 @@ class Application:
             else:
                 combined_df = pd.DataFrame(rows_to_write, columns=headers)
 
-            # 使用openpyxl引擎写入并设置格式
-            with pd.ExcelWriter(excel_filepath, engine='openpyxl') as writer:
-                combined_df.to_excel(writer, index=False, sheet_name='阅卷记录')
-
-                # 获取工作簿和工作表
-                workbook = writer.book
-                worksheet = writer.sheets['阅卷记录']
-
-                # 设置列宽
-                column_widths = {
-                    'A': 10,  # 题目编号
-                    'B': 10,  # API标识 / 学生答案摘要
-                    'C': 10,  # 分差阈值 / 工作模式
-                    'D': 80,  # 学生答案摘要 / OCR文本
-                    'E': 12,  # 工作模式 / OCR模型
-                    'F': 60,  # OCR文本 / 评分模型
-                    'G': 20,  # OCR模型 / AI分项得分
-                    'H': 20,  # 评分模型 / AI评分依据
-                    'I': 20,  # AI分项得分 / 最终得分
-                    'J': 200, # AI评分依据 / 评分细则
-                    'K': 15,  # AI原始总分
-                    'L': 12,  # 双评分差
-                    'M': 12,  # 最终得分
-                    'N': 50   # 评分细则(前50字)
-                }
-
-                for col, width in column_widths.items():
-                    if col in worksheet.column_dimensions:
-                        worksheet.column_dimensions[col].width = width
-
-                # 设置自动换行
-                from openpyxl.styles import Alignment
-                wrap_alignment = Alignment(wrap_text=True, vertical='top')
-
-                for row in worksheet.iter_rows():
-                    for cell in row:
-                        cell.alignment = wrap_alignment
-
-                # 设置标题行格式
-                from openpyxl.styles import Font
-                header_font = Font(bold=True)
-                for cell in worksheet[1]:
-                    cell.font = header_font
-
+            column_widths = {
+                'A': 10,  # 题目编号
+                'B': 10,  # API标识 / 学生答案摘要
+                'C': 10,  # 分差阈值 / 工作模式
+                'D': 80,  # 学生答案摘要 / OCR文本
+                'E': 12,  # 工作模式 / OCR模型
+                'F': 60,  # OCR文本 / 评分模型
+                'G': 20,  # OCR模型 / AI分项得分
+                'H': 20,  # 评分模型 / AI评分依据
+                'I': 20,  # AI分项得分 / 最终得分
+                'J': 200, # AI评分依据 / 评分细则
+                'K': 15,  # AI原始总分
+                'L': 12,  # 双评分差
+                'M': 12,  # 最终得分
+                'N': 50   # 评分细则(前50字)
+            }
+            self._write_excel_with_formatting(combined_df, excel_filepath, column_widths, bold_header=True)
             self.main_window.log_message(f"已保存阅卷记录到: {excel_filename}")
             return excel_filepath
 

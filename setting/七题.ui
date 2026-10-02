@@ -671,27 +671,12 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <item>
                  <property name="text">
-                  <string>一 识图直评</string>
+                  <string>1 AI识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                  <string>二 直评+推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>三 识评分离</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>四 分离+单推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>五 分离+双推理</string>
+                  <string>2 OCR+评分</string>
                  </property>
                 </item>
                </widget>

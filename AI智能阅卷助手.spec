@@ -17,17 +17,19 @@ from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 # 收集可能遗漏的子模块（仅在确有隐式导入时才需要），和 PyQt5 的 Qt 插件
 hiddenimports = collect_submodules('numpy') + collect_submodules('cv2')
 
-# 包含 PyQt5 的 Qt 平台插件，避免运行时 "could not load the Qt platform plugin" 错误
-# 并保留程序的 setting 目录作为数据文件，同时把应用图标一并打包。
+# 包含 PyQt5 的 Qt 平台插件，避免运行时 "could not load the Qt platform plugin" 错误，
+# 同时把应用图标一并打包。
 # 注意：onefile 模式下 datas 会解包到临时目录（sys._MEIPASS），运行时需要从那里取图标。
-datas = collect_data_files('PyQt5', subdir='Qt/plugins') + [('setting', 'setting'), ('AI阅卷助手.ico', '.')]
+# 只打包 setting/七题.ui，不打包整个 setting 目录——避免本机 setting/config.ini
+# （含真实API Key，打包后程序运行时也不会读取这份内置副本）被一并塞进exe而随分发泄露。
+datas = collect_data_files('PyQt5', subdir='Qt/plugins') + [('setting/七题.ui', 'setting'), ('AI阅卷助手.ico', '.')]
 
 a = Analysis(
     ['main.py'],
     pathex=['.'],  # 项目根路径，帮助 PyInstaller 定位模块和资源
     binaries=[],
     datas=datas,
-    hiddenimports=['PyQt5.sip', 'PyQt5.QtCore', 'PyQt5.QtGui', 'PyQt5.QtWidgets', 'api_service', 'auto_thread', 'config_manager', 'ui_components.main_window', 'ui_components.question_config_dialog', 'pyautogui', 'PIL', 'PIL.ImageGrab', 'PIL.Image', 'PIL.ImageDraw', 'appdirs', 'requests', 'winsound', 'pandas', 'openpyxl'] + hiddenimports,
+    hiddenimports=['PyQt5.sip', 'PyQt5.QtCore', 'PyQt5.QtGui', 'PyQt5.QtWidgets', 'api_service', 'auto_thread', 'grading_support', 'config_manager', 'ui_components.main_window', 'ui_components.question_config_dialog', 'pyautogui', 'PIL', 'PIL.ImageGrab', 'PIL.Image', 'PIL.ImageDraw', 'appdirs', 'requests', 'winsound', 'pandas', 'openpyxl'] + hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

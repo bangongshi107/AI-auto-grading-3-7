@@ -21,6 +21,7 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 # 从 api_service.py 导入转换函数和UI文本列表生成函数
 from api_service import get_provider_id_from_ui_text, get_ui_text_from_provider_id, UI_TEXT_TO_PROVIDER_ID, PROVIDER_CONFIGS
+from grading_support import classify_teacher_facing_error, TeacherErrorCategory
 
 class MainWindow(QMainWindow):
     # 日志级别定义
@@ -34,18 +35,12 @@ class MainWindow(QMainWindow):
     finished_signal = pyqtSignal()
 
     _WORK_MODE_UI_TO_ID = {
-        '识图直评': 'direct_grade',
-        '直评+推理': 'direct_grade_thinking',
-        '识评分离': 'ocr_then_grade',
-        '分离+推理': 'ocr_then_grade_thinking',
-        '分离+双推理': 'ocr_then_grade_dual_thinking',
+        'AI识图直评': 'direct_grade',
+        'OCR+评分': 'ocr_then_grade',
     }
     _WORK_MODE_ID_TO_DISPLAY = {
-        'direct_grade': '一 识图直评',
-        'direct_grade_thinking': '二 直评+推理',
-        'ocr_then_grade': '三 识评分离',
-        'ocr_then_grade_thinking': '四 分离+单推理',
-        'ocr_then_grade_dual_thinking': '五 分离+双推理',
+        'direct_grade': '1 AI识图直评',
+        'ocr_then_grade': '2 OCR+评分',
     }
 
 
@@ -299,48 +294,36 @@ class MainWindow(QMainWindow):
                 detail,
             )
 
-        # 典型错误归因（尽量“原因 + 怎么办”）
-        if any(k in low for k in ["timed out", "timeout", "read timed out"]):
-            return (
+        # 典型错误归因（尽量“原因 + 怎么办”）；分类逻辑与 main.py / api_service.py 共用
+        category_messages = {
+            TeacherErrorCategory.TIMEOUT: (
                 "网络可能不稳定，连接超时。\n"
-                "建议：1）检查网络是否能上网  2）稍等1分钟再点一次“测试/开始”。",
-                detail,
-            )
-
-        if any(k in low for k in ["401", "unauthorized", "invalid api key", "api key"]):
-            return (
+                "建议：1）检查网络是否能上网  2）稍等1分钟再点一次“测试/开始”。"
+            ),
+            TeacherErrorCategory.AUTH_401: (
                 "AI平台提示“密钥不正确或已失效”。\n"
-                "建议：到平台后台重新复制密钥，粘贴到软件里再测试。",
-                detail,
-            )
-
-        if any(k in low for k in ["403", "forbidden", "insufficient", "quota", "余额", "payment"]):
-            return (
+                "建议：到平台后台重新复制密钥，粘贴到软件里再测试。"
+            ),
+            TeacherErrorCategory.QUOTA_403: (
                 "AI平台账号可能没有权限或余额不足。\n"
-                "建议：检查账号余额/额度；必要时更换一个可用的AI平台。",
-                detail,
-            )
-
-        if any(k in low for k in ["429", "请求太频繁", "rate limit", "too many"]):
-            return (
+                "建议：检查账号余额/额度；必要时更换一个可用的AI平台。"
+            ),
+            TeacherErrorCategory.RATE_LIMIT_429: (
                 "请求太频繁，AI平台暂时不让访问。\n"
-                "建议：等10~30秒再试；或开启/使用第二组AI作为备用。",
-                detail,
-            )
-
-        if any(k in low for k in ["502", "503", "504", "service unavailable", "bad gateway"]):
-            return (
+                "建议：等10~30秒再试；或开启/使用第二组AI作为备用。"
+            ),
+            TeacherErrorCategory.SERVICE_5XX: (
                 "AI平台当前服务繁忙或临时不可用。\n"
-                "建议：稍后再试；或切换到第二组AI平台。",
-                detail,
-            )
-
-        if any(k in low for k in ["permission", "permissionerror", "access is denied", "被占用", "正在使用"]):
-            return (
+                "建议：稍后再试；或切换到第二组AI平台。"
+            ),
+            TeacherErrorCategory.FILE_PERMISSION: (
                 "文件可能正在被占用，或没有写入权限。\n"
-                "建议：1）关闭所有Excel文件  2）把软件放到桌面/D盘再运行  3）再试一次。",
-                detail,
-            )
+                "建议：1）关闭所有Excel文件  2）把软件放到桌面/D盘再运行  3）再试一次。"
+            ),
+        }
+        category = classify_teacher_facing_error(original)
+        if category in category_messages:
+            return category_messages[category], detail
 
         # 默认：给一个稳妥的通用说明（保持简短，不堆叠括号/前后缀）
         short_reason = f"{simplified[:80]}{'…' if len(simplified) > 80 else ''}".strip()
@@ -665,12 +648,9 @@ class MainWindow(QMainWindow):
             work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
             if work_mode_combo and isinstance(work_mode_combo, QComboBox):
                 work_mode_combo.clear()
-                work_mode_combo.addItem("一 识图直评", "direct_grade")
-                work_mode_combo.addItem("二 直评+推理", "direct_grade_thinking")
-                work_mode_combo.addItem("三 识评分离", "ocr_then_grade")
-                work_mode_combo.addItem("四 分离+单推理", "ocr_then_grade_thinking")
-                work_mode_combo.addItem("五 分离+双推理", "ocr_then_grade_dual_thinking")
-                work_mode_combo.setToolTip("识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI识别文字后评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理")
+                work_mode_combo.addItem("1 AI识图直评", "direct_grade")
+                work_mode_combo.addItem("2 OCR+评分", "ocr_then_grade")
+                work_mode_combo.setToolTip("AI识图直评：AI看图直接评分；OCR+评分：先识别文字，再按文字评分（不支持双评）。两种模式均开启思考。")
 
         self.load_config_to_ui()
         self._connect_signals() # <--- 在这里统一调用
@@ -779,7 +759,7 @@ class MainWindow(QMainWindow):
                     if index >= 0:
                         work_mode_combo.setCurrentIndex(index)
                     else:
-                        display_text = self._WORK_MODE_ID_TO_DISPLAY.get(work_mode_value, '一 识图直评')
+                        display_text = self._WORK_MODE_ID_TO_DISPLAY.get(work_mode_value, '1 AI识图直评')
                         work_mode_combo.setCurrentText(display_text)
                 
 
@@ -909,7 +889,7 @@ class MainWindow(QMainWindow):
             if dual_evaluation:
                 for q_idx in enabled_questions_indices:
                     q_cfg = self.config_manager.get_question_config(q_idx)
-                    if q_cfg.get('work_mode') in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'}:
+                    if q_cfg.get('work_mode') == 'ocr_then_grade':
                         dual_evaluation = False
                         dual_eval_checkbox = self.get_ui_element('dual_evaluation_enabled')
                         if dual_eval_checkbox:
@@ -1170,12 +1150,12 @@ class MainWindow(QMainWindow):
                     if not mode_value:
                         normalized = self._normalize_work_mode_ui_text(work_mode_combo.currentText())
                         mode_value = self._WORK_MODE_UI_TO_ID.get(normalized, 'direct_grade')
-                    if mode_value in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'}:
+                    if mode_value == 'ocr_then_grade':
                         has_ocr_then_grade = True
                         break
                 else:
                     q_cfg = self.config_manager.get_question_config(q_idx)
-                    if q_cfg.get('work_mode') in {'ocr_then_grade', 'ocr_then_grade_thinking', 'ocr_then_grade_dual_thinking'}:
+                    if q_cfg.get('work_mode') == 'ocr_then_grade':
                         has_ocr_then_grade = True
                         break
         except Exception:
@@ -1249,7 +1229,7 @@ class MainWindow(QMainWindow):
     def _normalize_work_mode_ui_text(self, ui_text: str) -> str:
         """将工作模式下拉框显示文本标准化为核心关键字。"""
         text = str(ui_text).strip() if ui_text is not None else ""
-        if text and text[0] in "一二三四五":
+        if text and text[0] in "12一二三四五":
             text = text[1:].strip()
         text = text.replace(" ", "")
         return text

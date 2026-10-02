@@ -7,17 +7,8 @@ import appdirs
 
 class ConfigManager:
     """配置管理器,负责保存和加载配置"""
-    _instance = None
-    _initialized = False
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(ConfigManager, cls).__new__(cls)
-        return cls._instance
 
     def __init__(self):
-        if ConfigManager._initialized:
-            return
         self.parser = configparser.ConfigParser(allow_no_value=True, interpolation=None)
 
         app_name = "AutoGraderApp"
@@ -34,7 +25,6 @@ class ConfigManager:
         self.max_questions = 7
         self._init_default_config()
         self.load_config()
-        ConfigManager._initialized = True
 
     def _init_default_config(self):
         """初始化默认配置值
@@ -80,7 +70,7 @@ class ConfigManager:
                 'enable_next_button': False,
                 'next_button_pos': None,
                 'question_type': 'Subjective_PointBased_QA',
-                'work_mode': 'direct_grade',  # 识图直评 / 直评+推理 / 识评分离 / 分离+推理 / 分离+双推理
+                'work_mode': 'direct_grade',  # direct_grade(AI识图直评) / ocr_then_grade(OCR+评分)
                 'score_rounding_step': 0.5,  # 每题独立步长，默认0.5
             }
             if is_q1:
@@ -220,21 +210,11 @@ class ConfigManager:
     def _normalize_work_mode(self, raw_value) -> str:
         """将配置中的工作模式标准化为内部标识。"""
         value = str(raw_value).strip() if raw_value is not None else ""
-        if not value:
-            return "direct_grade"
-        if value in {"direct_grade", "direct_grade_thinking", "ocr_then_grade", "ocr_then_grade_thinking", "ocr_then_grade_dual_thinking"}:
+        if value in {"direct_grade", "ocr_then_grade"}:
             return value
-        # 兼容UI文本或旧值
-        if value in {"识图直评", "一 识图直评", "直评", "直接评分"}:
-            return "direct_grade"
-        if value in {"直评+推理", "二 直评+推理", "二直评+推理", "直评推理"}:
-            return "direct_grade_thinking"
-        if value in {"识评分离", "三 识评分离", "三识评分离", "二 识评分离", "分离", "识别评分", "OCR评分"}:
+        # 兼容旧版本的五种模式：思考现已恒开，旧的直评类并入 direct_grade，分离类并入 ocr_then_grade
+        if value.startswith("ocr_then_grade") or "分离" in value or "OCR" in value.upper():
             return "ocr_then_grade"
-        if value in {"分离+推理", "四 分离+推理", "四分离+推理", "识评分离+推理", "分离推理"}:
-            return "ocr_then_grade_thinking"
-        if value in {"分离+双推理", "五 分离+双推理", "五 分离+ 双推理", "五分离+双推理", "分离+双推", "双推理分离", "识评分离+双推理"}:
-            return "ocr_then_grade_dual_thinking"
         return "direct_grade"
 
     def _get_config_safe(self, section, option, default_value, value_type: type = str):

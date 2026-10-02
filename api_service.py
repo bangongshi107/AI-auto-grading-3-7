@@ -13,6 +13,12 @@ import sys
 from datetime import datetime
 from threading import Lock, local
 
+from grading_support import classify_teacher_facing_error, TeacherErrorCategory
+
+# 思考模式会占用输出额度并拖慢响应，固定取较宽松的值（仍不超过多数视觉模型的上限）
+MAX_OUTPUT_TOKENS = 8192
+REQUEST_TIMEOUT = 180  # 秒
+
 # ==============================================================================
 #  UI文本到提供商ID的映射字典 (UI Text to Provider ID Mapping)
 #  这是连接UI显示文本和后台代码的桥梁。
@@ -217,33 +223,27 @@ class ApiService:
     def call_second_api(self, img_str: str, prompt: Any) -> Tuple[Optional[str], Optional[str]]:
         return self._call_api_by_group("second", img_str, prompt)
 
+    def _get_group_config(self, api_group: str) -> Tuple[str, str, str]:
+        """读取指定API组的 (provider内部ID, api_key, model_id)。api_group 必须是 first/second。"""
+        cm = self.config_manager
+        provider = getattr(cm, f"{api_group}_api_provider")
+        api_key = getattr(cm, f"{api_group}_api_key")
+        model_id = getattr(cm, f"{api_group}_modelID")
+
+        # provider 可能是 UI 文本（如“火山引擎 (推荐)”）而不是内部ID（如 volcengine）
+        if provider and provider not in PROVIDER_CONFIGS:
+            mapped_provider = get_provider_id_from_ui_text(str(provider))
+            if mapped_provider:
+                provider = mapped_provider
+                setattr(cm, f"{api_group}_api_provider", provider)  # 写回内存，保存时落盘为内部ID
+        return provider, api_key, model_id
+
     def _call_api_by_group(self, api_group: str, img_str: str, prompt: Any) -> Tuple[Optional[str], Optional[str]]:
         """根据API组别调用对应的预设供应商API"""
         try:
-            if api_group == "first":
-                provider = self.config_manager.first_api_provider
-                api_key = self.config_manager.first_api_key
-                model_id = self.config_manager.first_modelID
-            elif api_group == "second":
-                provider = self.config_manager.second_api_provider
-                api_key = self.config_manager.second_api_key
-                model_id = self.config_manager.second_modelID
-            else:
+            if api_group not in ("first", "second"):
                 return None, "无效的API组别"
-
-            # 兼容：provider 可能是 UI 文本（如“火山引擎 (推荐)”）而不是内部ID（如 volcengine）
-            if provider and provider not in PROVIDER_CONFIGS:
-                mapped_provider = get_provider_id_from_ui_text(str(provider))
-                if mapped_provider:
-                    provider = mapped_provider
-                    # 写回内存，确保后续保存会落盘为内部ID
-                    try:
-                        if api_group == "first":
-                            self.config_manager.first_api_provider = provider
-                        elif api_group == "second":
-                            self.config_manager.second_api_provider = provider
-                    except Exception:
-                        pass
+            provider, api_key, model_id = self._get_group_config(api_group)
 
             if not all([provider, api_key, model_id]):
                 return None, f"第{api_group}组API配置不完整 (供应商、Key或模型ID为空)"
@@ -258,34 +258,13 @@ class ApiService:
     def test_api_connection(self, api_group: str) -> Tuple[bool, str]:
         """测试指定API组的连接"""
         try:
-            if api_group == "first":
-                provider, api_key, model_id, group_name = (
-                    self.config_manager.first_api_provider, self.config_manager.first_api_key,
-                    self.config_manager.first_modelID, "第一个"
-                )
-            elif api_group == "second":
-                provider, api_key, model_id, group_name = (
-                    self.config_manager.second_api_provider, self.config_manager.second_api_key,
-                    self.config_manager.second_modelID, "第二个"
-                )
-            else:
+            if api_group not in ("first", "second"):
                 return False, "无效的API组别"
-            
+            group_name = "第一个" if api_group == "first" else "第二个"
+            provider, api_key, model_id = self._get_group_config(api_group)
+
             if not all([provider, api_key.strip(), model_id.strip()]):
                 return False, f"{group_name}组信息没填完整（平台/密钥/模型ID）"
-
-            # 兼容：provider 可能是 UI 文本
-            if provider and provider not in PROVIDER_CONFIGS:
-                mapped_provider = get_provider_id_from_ui_text(str(provider))
-                if mapped_provider:
-                    provider = mapped_provider
-                    try:
-                        if api_group == "first":
-                            self.config_manager.first_api_provider = provider
-                        elif api_group == "second":
-                            self.config_manager.second_api_provider = provider
-                    except Exception:
-                        pass
 
             # 测试AI评分API
             self.logger.info(f"[API Test] 测试{group_name}API, 供应商: {provider}")
@@ -294,21 +273,18 @@ class ApiService:
             provider_name = PROVIDER_CONFIGS.get(provider, {}).get("name", provider)
             
             def _friendly_reason(err: Optional[str]) -> str:
+                messages = {
+                    TeacherErrorCategory.TIMEOUT: "网络可能不稳定（连接超时）",
+                    TeacherErrorCategory.AUTH_401: "密钥可能不正确或已失效",
+                    TeacherErrorCategory.QUOTA_403: "账号可能没有权限或余额/额度不足",
+                    TeacherErrorCategory.RATE_LIMIT_429: "请求太频繁，平台临时限制",
+                    TeacherErrorCategory.SERVICE_5XX: "平台服务繁忙或临时不可用",
+                }
+                category = classify_teacher_facing_error(err)
+                if category in messages:
+                    return messages[category]
                 s = (err or "").strip()
-                low = s.lower()
-                if any(k in low for k in ["timed out", "timeout"]):
-                    return "网络可能不稳定（连接超时）"
-                if any(k in low for k in ["401", "unauthorized", "invalid api key"]):
-                    return "密钥可能不正确或已失效"
-                if any(k in low for k in ["403", "forbidden", "quota", "余额", "payment", "insufficient"]):
-                    return "账号可能没有权限或余额/额度不足"
-                if any(k in low for k in ["429", "rate limit", "too many"]):
-                    return "请求太频繁，平台临时限制"
-                if any(k in low for k in ["502", "503", "504", "service unavailable", "bad gateway"]):
-                    return "平台服务繁忙或临时不可用"
-                if not s:
-                    return "原因不明"
-                return s
+                return s if s else "原因不明"
 
             if not (result and not error):
                 reason = _friendly_reason(error)
@@ -400,7 +376,7 @@ class ApiService:
             self.logger.debug(f"[{provider_name}] 发送API请求到: {url}")
             
             headers["Content-Type"] = "application/json"
-            response = self._get_session().post(url, headers=headers, json=payload, timeout=60)
+            response = self._get_session().post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
 
             self.logger.debug(f"[{provider_name}] 收到响应: 状态码 {response.status_code}")
 
@@ -413,6 +389,10 @@ class ApiService:
                 except Exception as e:
                     self.logger.warning(f"[{provider_name}] 响应JSON解析失败: {e}")
                     return None, f"API响应JSON解析失败：{e}"
+
+                if self._is_truncated(data, provider):
+                    self.logger.warning(f"[{provider_name}] 输出被截断")
+                    return None, f"[{provider_name}] AI输出被截断（超过{MAX_OUTPUT_TOKENS} tokens上限），请精简评分细则或更换模型"
 
                 content = self._extract_response_content(data, provider)
                 if content:
@@ -443,25 +423,25 @@ class ApiService:
             friendly_error = self._create_network_error_message(e)
             return None, friendly_error
 
-    def _extract_response_content(self, data: Dict[str, Any], provider: str) -> Optional[str]:
-        """从API响应中提取内容
-        
-        支持的提供商响应格式：
-        - OpenAI兼容格式: openai, moonshot, openrouter, zhipu, volcengine, aliyun, baidu, deepseek
-        - Google Gemini格式: gemini
-        """
+    @staticmethod
+    def _is_truncated(data: Dict[str, Any], provider: str) -> bool:
+        """响应是否因达到输出上限而被截断。"""
         try:
-            # OpenAI兼容格式 - 标准的 choices[0].message.content
-            if provider in ["openai", "moonshot", "openrouter", "zhipu", "volcengine", "aliyun", "baidu", "deepseek"]:
-                return data["choices"][0]["message"]["content"]
-            
-            # Google Gemini - 特殊格式
+            if provider == "gemini":
+                return data["candidates"][0].get("finishReason") == "MAX_TOKENS"
+            return data["choices"][0].get("finish_reason") == "length"
+        except (KeyError, IndexError, TypeError, AttributeError):
+            return False
+
+    def _extract_response_content(self, data: Dict[str, Any], provider: str) -> Optional[str]:
+        """从API响应中提取内容：Gemini 用 candidates 结构，其余均为 OpenAI 兼容的 choices 结构。"""
+        try:
             if provider == "gemini":
                 return data["candidates"][0]["content"]["parts"][0]["text"]
+            return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as e:
             self.logger.warning(f"解析{provider}响应失败: {e}")
-            return None # 解析失败
-        return str(data) # Fallback
+            return None
 
     def _get_pure_base64(self, img_str: str) -> str:
         if not img_str: return ""
@@ -480,17 +460,9 @@ class ApiService:
         # 支持 prompt 为字符串或 {system,user} 结构
         system_text = ""
         user_text = ""
-        thinking_cfg = {"type": "disabled"}
         if isinstance(prompt, dict):
             system_text = str(prompt.get("system", "") or "")
             user_text = str(prompt.get("user", "") or "")
-            raw_thinking = prompt.get("thinking")
-            if raw_thinking:
-                if isinstance(raw_thinking, dict):
-                    thinking_type = raw_thinking.get("type") or raw_thinking.get("mode") or raw_thinking.get("value")
-                    thinking_cfg = {"type": str(thinking_type)} if thinking_type else raw_thinking
-                elif isinstance(raw_thinking, str):
-                    thinking_cfg = {"type": raw_thinking}
         else:
             user_text = str(prompt)
 
@@ -500,7 +472,7 @@ class ApiService:
 
         if not img_str:
             messages.append({"role": "user", "content": user_text})
-            return {"model": model_id, "messages": messages, "max_tokens": 4096}
+            return {"model": model_id, "messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
 
         pure_base64 = self._get_pure_base64(img_str)
         # 视觉模式：system 作为单独消息，user 带 image+text
@@ -511,7 +483,7 @@ class ApiService:
                 {"type": "text", "text": user_text}
             ]
         })
-        return {"model": model_id, "messages": messages, "max_tokens": 4096}
+        return {"model": model_id, "messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
 
 
 
@@ -539,13 +511,10 @@ class ApiService:
         """
         system_text = ""
         user_text = ""
-        thinking_cfg = {"type": "disabled"}
+        thinking_cfg = {"type": "enabled"}  # 思考模式恒开
         if isinstance(prompt, dict):
             system_text = str(prompt.get("system", "") or "")
             user_text = str(prompt.get("user", "") or "")
-            prompt_thinking = prompt.get("thinking")
-            if isinstance(prompt_thinking, dict) and prompt_thinking.get("type"):
-                thinking_cfg = prompt_thinking
         else:
             user_text = str(prompt)
 
@@ -559,7 +528,7 @@ class ApiService:
             return {
                 "model": model_id,
                 "messages": messages,
-                "max_tokens": 4096,
+                "max_tokens": MAX_OUTPUT_TOKENS,
                 "thinking": thinking_cfg
             }
 
@@ -582,7 +551,7 @@ class ApiService:
         return {
             "model": model_id,
             "messages": messages,
-            "max_tokens": 4096,
+            "max_tokens": MAX_OUTPUT_TOKENS,
             "thinking": thinking_cfg
         }
 
@@ -655,12 +624,4 @@ class ApiService:
 
         # 通用网络错误
         return f"【网络连接失败】无法连接到API服务器。\n请检查您的网络设置和防火墙。错误详情: {error_str[:150]}"
-
-    def update_config_from_manager(self):
-        """
-        这个方法在我们的新架构中不再需要。
-        因为 `call_api` 等方法每次都会直接从 `config_manager` 读取最新的配置。
-        保留此空方法以防止旧代码调用时出错。
-        """
-        pass
 
