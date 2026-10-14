@@ -2,45 +2,37 @@
 # 支持多平台：火山引擎、阿里通义、百度千帆、DeepSeek、智谱、月之暗面、OpenRouter、OpenAI、Google Gemini
 
 import requests
+import re
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import logging
 import traceback
 from typing import Tuple, Optional, Dict, Any
-import time
-import json
 import sys
 from datetime import datetime
-from threading import Lock, local
+from threading import local
 
 from grading_support import classify_teacher_facing_error, TeacherErrorCategory
 
 # 思考模式会占用输出额度并拖慢响应，固定取较宽松的值（仍不超过多数视觉模型的上限）
 MAX_OUTPUT_TOKENS = 8192
+# DeepSeek / OpenAI 的思考过程计入输出上限，8192 容易被思考吃满导致正文被截断
+REASONING_MAX_OUTPUT_TOKENS = 32768
 REQUEST_TIMEOUT = 180  # 秒
-
-# ==============================================================================
-#  UI文本到提供商ID的映射字典 (UI Text to Provider ID Mapping)
-#  这是连接UI显示文本和后台代码的桥梁。
-#  UI上的"火山引擎 (豆包)" 对应到代码里的 "volcengine"。
-#  现在基于 PROVIDER_CONFIGS 动态生成，避免数据冗余。
-#  注意：只包含AI评分模型提供商
-# ==============================================================================
-def generate_ui_text_to_provider_id():
-    """基于 PROVIDER_CONFIGS 动态生成 UI_TEXT_TO_PROVIDER_ID 映射"""
-    return {
-        config["name"]: provider_id 
-        for provider_id, config in PROVIDER_CONFIGS.items()
-    }
+# 思考模式 + 高清手写图响应更慢；先按 300 秒放宽，待实测耗时后再调整
+REASONING_REQUEST_TIMEOUT = 300  # 秒
 
 # ==============================================================================
 #  权威供应商配置字典 (Authoritative Provider Configuration)
-#  这是整个系统的"单一事实来源 (Single Source of Truth)"。
+#  这里定义每个供应商的接口行为（地址、鉴权、请求体格式）。
+#  下拉框里“提供哪些选项、显示什么文字”由 setting/七题.ui 决定（见 ui_schema.py），
+#  "name" 必须与 .ui 里的选项文字一致；"aliases" 仅用于兼容旧配置里写过的名称。
 # ==============================================================================
 PROVIDER_CONFIGS = {
     # 这里的 key ('volcengine', 'moonshot'等) 是程序内部使用的【内部标识】
     "volcengine": {
-        "name": "火山引擎 (推荐)",
+        "name": "火山引擎",
+        "aliases": ("火山引擎 (推荐)",),
         "url": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
         "auth_method": "bearer",
         "payload_builder": "_build_volcengine_payload",
@@ -61,7 +53,9 @@ PROVIDER_CONFIGS = {
         "name": "DeepSeek",
         "url": "https://api.deepseek.com/chat/completions",
         "auth_method": "bearer",
-        "payload_builder": "_build_openai_compatible_payload",
+        "payload_builder": "_build_deepseek_payload",
+        "max_output_tokens": REASONING_MAX_OUTPUT_TOKENS,
+        "timeout": REASONING_REQUEST_TIMEOUT,
     },
     "aliyun": {
         "name": "阿里通义千问",
@@ -81,13 +75,16 @@ PROVIDER_CONFIGS = {
         "auth_method": "bearer",
         "payload_builder": "_build_openai_compatible_payload",
     },
-    "openai": { # 新增
-        "name": "OpenAI",
+    "openai": {
+        "name": "ChatGPT (OpenAI)",
+        "aliases": ("ChatGPT", "OpenAI"),
         "url": "https://api.openai.com/v1/chat/completions",
         "auth_method": "bearer",
-        "payload_builder": "_build_openai_compatible_payload",
+        "payload_builder": "_build_openai_payload",
+        "max_output_tokens": REASONING_MAX_OUTPUT_TOKENS,
+        "timeout": REASONING_REQUEST_TIMEOUT,
     },
-    "gemini": { # 新增
+    "gemini": {
         "name": "Google Gemini",
         "url": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",  # {model} 将被动态替换
         "auth_method": "google_api_key_in_url",
@@ -97,20 +94,34 @@ PROVIDER_CONFIGS = {
 }
 
 # ==============================================================================
-#  生成UI文本到提供商ID的映射常量
-# ==============================================================================
-UI_TEXT_TO_PROVIDER_ID = generate_ui_text_to_provider_id()
-
-# ==============================================================================
-#  辅助函数，用于UI和内部ID之间的转换
+#  辅助函数，用于UI显示文本和内部ID之间的转换
 # ==============================================================================
 def get_provider_id_from_ui_text(ui_text: str) -> Optional[str]:
-    mapping = generate_ui_text_to_provider_id()
-    return mapping.get(ui_text.strip())
+    text = (ui_text or "").strip()
+    for provider_id, config in PROVIDER_CONFIGS.items():
+        if text == config["name"] or text in config.get("aliases", ()):
+            return provider_id
+    return None
 
-def get_ui_text_from_provider_id(provider_id: str) -> Optional[str]:
-    config = PROVIDER_CONFIGS.get(provider_id)
-    return config["name"] if config else None
+def build_test_image_data_uri() -> str:
+    """生成一张小的测试图片（JPEG data URI），用于连接测试时验证模型能否接收图片。
+    生成失败时返回空串，调用方退化为纯文本测试。"""
+    try:
+        import base64
+        import io
+        from PIL import Image, ImageDraw
+
+        img = Image.new("RGB", (256, 256), "white")
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((40, 40, 216, 216), outline="black", width=6)
+        draw.line((40, 40, 216, 216), fill="black", width=6)
+        draw.line((40, 216, 216, 40), fill="black", width=6)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return ""
+
 
 class ApiService:
     def __init__(self, config_manager):
@@ -165,12 +176,16 @@ class ApiService:
         if sess is None:
             sess = requests.Session()
             
-            # 配置智能重试策略：解决连接池复用导致的"Max retries exceeded"问题
+            # 重试策略：只重试“连接阶段”失败（请求还没发出，安全且很快）。
+            # 读超时、5xx 都不在这里重试——它们由 AutoThread 的双API交叉重试统一处理，
+            # 否则 300 秒的超时会被底层重试放大成十几分钟的卡死。
             retry_strategy = Retry(
-                total=3,                    # 总共重试3次
-                backoff_factor=0.5,         # 指数退避：0.5s, 1s, 2s
-                status_forcelist=[500, 502, 503, 504],  # 服务端错误时重试
-                allowed_methods=["POST"],   # 允许POST请求重试
+                total=2,
+                connect=2,                  # 连接失败最多重试2次
+                read=0,                     # 读超时不重试
+                status=0,                   # 5xx 不重试
+                other=0,
+                backoff_factor=0.5,         # 退避：0.5s, 1s
                 raise_on_status=False,      # 不抛出状态码异常，由业务层处理
             )
             
@@ -230,7 +245,7 @@ class ApiService:
         api_key = getattr(cm, f"{api_group}_api_key")
         model_id = getattr(cm, f"{api_group}_modelID")
 
-        # provider 可能是 UI 文本（如“火山引擎 (推荐)”）而不是内部ID（如 volcengine）
+        # provider 可能是 UI 文本（如“火山引擎”）而不是内部ID（如 volcengine）
         if provider and provider not in PROVIDER_CONFIGS:
             mapped_provider = get_provider_id_from_ui_text(str(provider))
             if mapped_provider:
@@ -266,9 +281,12 @@ class ApiService:
             if not all([provider, api_key.strip(), model_id.strip()]):
                 return False, f"{group_name}组信息没填完整（平台/密钥/模型ID）"
 
-            # 测试AI评分API
+            # 测试请求带一张小图：评分和OCR都要看图，只测文字通不通无法发现“模型不支持图片输入”
             self.logger.info(f"[API Test] 测试{group_name}API, 供应商: {provider}")
-            result, error = self._execute_api_call(provider, api_key, model_id, img_str="", prompt="你好")
+            test_image = build_test_image_data_uri()
+            result, error = self._execute_api_call(
+                provider, api_key, model_id, img_str=test_image, prompt="这是连通性测试，请只回复：OK"
+            )
 
             provider_name = PROVIDER_CONFIGS.get(provider, {}).get("name", provider)
             
@@ -291,12 +309,13 @@ class ApiService:
                 msg = (
                     f"{provider_name}：连接失败。\n"
                     f"可能原因：{reason}。\n"
-                    "建议：检查密钥/模型ID是否填写正确；确认账号余额/额度；网络正常后再试。"
+                    "建议：检查密钥/模型ID是否填写正确；确认所选模型支持图片输入（测试会带一张小图）；"
+                    "确认账号余额/额度；网络正常后再试。"
                 )
                 return False, msg
             
             # AI评分API连接成功，构建结果信息
-            result_info = f"{provider_name}：连接成功"
+            result_info = f"{provider_name}：连接成功" + ("（已验证可接收图片）" if test_image else "")
             
             return True, result_info
         except Exception as e:
@@ -376,7 +395,9 @@ class ApiService:
             self.logger.debug(f"[{provider_name}] 发送API请求到: {url}")
             
             headers["Content-Type"] = "application/json"
-            response = self._get_session().post(url, headers=headers, json=payload, timeout=REQUEST_TIMEOUT)
+            response = self._get_session().post(
+                url, headers=headers, json=payload, timeout=config.get("timeout", REQUEST_TIMEOUT)
+            )
 
             self.logger.debug(f"[{provider_name}] 收到响应: 状态码 {response.status_code}")
 
@@ -392,7 +413,8 @@ class ApiService:
 
                 if self._is_truncated(data, provider):
                     self.logger.warning(f"[{provider_name}] 输出被截断")
-                    return None, f"[{provider_name}] AI输出被截断（超过{MAX_OUTPUT_TOKENS} tokens上限），请精简评分细则或更换模型"
+                    token_limit = config.get("max_output_tokens", MAX_OUTPUT_TOKENS)
+                    return None, f"[{provider_name}] AI输出被截断（超过{token_limit} tokens上限，思考过程也计入），请精简评分细则或更换模型"
 
                 content = self._extract_response_content(data, provider)
                 if content:
@@ -433,13 +455,42 @@ class ApiService:
         except (KeyError, IndexError, TypeError, AttributeError):
             return False
 
+    @staticmethod
+    def _strip_reasoning(text: Optional[str]) -> str:
+        """去掉混在正文里的思考过程，只保留最终回答。
+
+        DeepSeek / OpenAI 官方接口把思考放在独立字段（reasoning_content 等），正文本身是干净的；
+        这里额外兜底一些网关/开源部署把 <think>...</think> 直接拼进 content 的情况。
+        """
+        if not text:
+            return ""
+        text = re.sub(r"<think(?:ing)?>.*?</think(?:ing)?>", "", text, flags=re.DOTALL | re.IGNORECASE)
+        # 只有结束标签、没有开始标签：结束标签之前都是思考
+        match = re.search(r"</think(?:ing)?>", text, flags=re.IGNORECASE)
+        if match:
+            text = text[match.end():]
+        return text.strip()
+
     def _extract_response_content(self, data: Dict[str, Any], provider: str) -> Optional[str]:
-        """从API响应中提取内容：Gemini 用 candidates 结构，其余均为 OpenAI 兼容的 choices 结构。"""
+        """从API响应中提取最终回答（不含思考过程）。
+
+        Gemini 用 candidates 结构，其余均为 OpenAI 兼容的 choices 结构；
+        只读取 message.content，不读取 reasoning_content。
+        """
         try:
             if provider == "gemini":
-                return data["candidates"][0]["content"]["parts"][0]["text"]
-            return data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as e:
+                parts = data["candidates"][0]["content"]["parts"]
+                # Gemini 的思考摘要带 thought=True 标记，需排除
+                text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+                return text or None
+            content = data["choices"][0]["message"]["content"]
+            if isinstance(content, list):
+                content = "".join(
+                    str(block.get("text", "")) for block in content
+                    if isinstance(block, dict) and block.get("type", "text") == "text"
+                )
+            return self._strip_reasoning(content) or None
+        except (KeyError, IndexError, TypeError, AttributeError) as e:
             self.logger.warning(f"解析{provider}响应失败: {e}")
             return None
 
@@ -452,112 +503,78 @@ class ApiService:
     # ==========================================================================
     #  各厂商专属的Payload构建函数
     # ==========================================================================
+    def _build_chat_messages(self, img_str, prompt, detail=None):
+        """构造 OpenAI 风格的 messages。prompt 可为字符串或 {system,user} 结构。
+        核心原则: 图片在前，文本在后，以保证最大兼容性。"""
+        system_text = ""
+        user_text = ""
+        if isinstance(prompt, dict):
+            system_text = str(prompt.get("system", "") or "")
+            user_text = str(prompt.get("user", "") or "")
+        else:
+            user_text = str(prompt)
+
+        messages = []
+        if system_text.strip():
+            messages.append({"role": "system", "content": system_text})
+
+        if not img_str:
+            messages.append({"role": "user", "content": user_text})
+            return messages
+
+        image_url = {"url": f"data:image/jpeg;base64,{self._get_pure_base64(img_str)}"}
+        if detail:
+            image_url["detail"] = detail
+        messages.append({
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": image_url},
+                {"type": "text", "text": user_text}
+            ]
+        })
+        return messages
+
     def _build_openai_compatible_payload(self, model_id, img_str, prompt):
-        """
-        适用于大多数与OpenAI兼容的厂商 (Moonshot, 智谱, Baidu V2, Aliyun-Compatible等)
-        核心原则: 图片在前，文本在后，以保证最大兼容性。
-        """
-        # 支持 prompt 为字符串或 {system,user} 结构
-        system_text = ""
-        user_text = ""
-        if isinstance(prompt, dict):
-            system_text = str(prompt.get("system", "") or "")
-            user_text = str(prompt.get("user", "") or "")
-        else:
-            user_text = str(prompt)
-
-        messages = []
-        if system_text.strip():
-            messages.append({"role": "system", "content": system_text})
-
-        if not img_str:
-            messages.append({"role": "user", "content": user_text})
-            return {"model": model_id, "messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
-
-        pure_base64 = self._get_pure_base64(img_str)
-        # 视觉模式：system 作为单独消息，user 带 image+text
-        messages.append({
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{pure_base64}"}},
-                {"type": "text", "text": user_text}
-            ]
-        })
-        return {"model": model_id, "messages": messages, "max_tokens": MAX_OUTPUT_TOKENS}
-
-
-
-    def _build_volcengine_payload(self, model_id, img_str, prompt):
-        """
-        专为火山引擎定制 - 符合官方API文档格式
-
-        AI自动改卷程序专用优化 (2025-09-13 更新):
-        ============================================
-        当前优化: 默认使用高细节模式提升手写文字识别精度
-        适用场景: AI批改学生答案图片，需准确识别手写内容
-
-        优化详情:
-        - detail: "high" - 高细节模式，适用于复杂手写识别
-        - 优势: 更好的文字识别精度，适合教育场景
-        - 权衡: 可能增加响应时间和token消耗
-
-        后续优化计划:
-        ============================================
-        1. 图片质量自适应: 根据图片复杂度自动选择detail等级
-        2. 模型验证: 确保用户选择的模型支持视觉输入
-        3. 性能监控: 添加图片大小和处理时间统计
-        4. 配置选项: 允许用户自定义detail参数
-        5. 批量优化: 支持多图片同时处理
-        """
-        system_text = ""
-        user_text = ""
-        thinking_cfg = {"type": "enabled"}  # 思考模式恒开
-        if isinstance(prompt, dict):
-            system_text = str(prompt.get("system", "") or "")
-            user_text = str(prompt.get("user", "") or "")
-        else:
-            user_text = str(prompt)
-
-        messages = []
-        if system_text.strip():
-            messages.append({"role": "system", "content": system_text})
-
-        if not img_str:
-            # 纯文本模式
-            messages.append({"role": "user", "content": user_text})
-            return {
-                "model": model_id,
-                "messages": messages,
-                "max_tokens": MAX_OUTPUT_TOKENS,
-                "thinking": thinking_cfg
-            }
-
-        # 视觉模式 - AI改卷专用配置
-        # 按照火山引擎官方文档：image在前，text在后
-        pure_base64 = self._get_pure_base64(img_str)
-        messages.append({
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{pure_base64}",
-                        "detail": "high"
-                    }
-                },
-                {"type": "text", "text": user_text}
-            ]
-        })
+        """适用于大多数与OpenAI兼容的厂商 (Moonshot, 智谱, Baidu V2, Aliyun-Compatible等)"""
         return {
             "model": model_id,
-            "messages": messages,
+            "messages": self._build_chat_messages(img_str, prompt),
             "max_tokens": MAX_OUTPUT_TOKENS,
-            "thinking": thinking_cfg
+        }
+
+    def _build_deepseek_payload(self, model_id, img_str, prompt):
+        """DeepSeek：思考恒开（关闭会明显降低评分正确率），思考内容由响应里的 reasoning_content 单独返回，
+        解析时只取 content。不显式传 reasoning_effort：官方默认即 high，足够手写评分；
+        再调高到 max 只会更慢更贵，调低则可能影响正确率。思考过程计入 max_tokens，因此上限放宽。
+        不传 detail：DeepSeek 默认（auto）即保留原图，并统一缩放到约 1300×1300 以内，传 high 没有区别。"""
+        return {
+            "model": model_id,
+            "messages": self._build_chat_messages(img_str, prompt),
+            "max_tokens": REASONING_MAX_OUTPUT_TOKENS,
+            "thinking": {"type": "enabled"},
+        }
+
+    def _build_openai_payload(self, model_id, img_str, prompt):
+        """OpenAI：新一代推理模型不再接受 max_tokens，必须使用 max_completion_tokens（旧模型同样支持）。
+        不传 reasoning_effort，沿用模型默认的思考强度，避免不支持该参数的模型报错。
+        detail 固定为 high：auto 可能对中等尺寸图片选 low（缩到 512×512），会糊掉手写笔画；
+        high 只多出几百个输入 token，相对思考用掉的输出 token 可以忽略。截图本身不放大，也不再额外提高分辨率。"""
+        return {
+            "model": model_id,
+            "messages": self._build_chat_messages(img_str, prompt, detail="high"),
+            "max_completion_tokens": REASONING_MAX_OUTPUT_TOKENS,
         }
 
 
 
-
+    def _build_volcengine_payload(self, model_id, img_str, prompt):
+        """火山引擎：图片在前文本在后，detail=high 保留手写笔画细节，思考模式恒开。"""
+        return {
+            "model": model_id,
+            "messages": self._build_chat_messages(img_str, prompt, detail="high"),
+            "max_tokens": MAX_OUTPUT_TOKENS,
+            "thinking": {"type": "enabled"},
+        }
 
     def _build_gemini_payload(self, model_id, img_str, prompt):
         """专为 Google Gemini 定制"""

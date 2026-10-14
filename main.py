@@ -794,21 +794,6 @@ class Application:
             now = datetime.datetime.now()
             date_str = now.strftime('%Y年%m月%d日')
 
-        # 转换日期格式：从中文格式提取数字部分用于目录命名
-        if '年' in date_str and '月' in date_str and '日' in date_str:
-            # 中文格式：2025年09月20日 -> 20250920
-            try:
-                year = date_str.split('年')[0]
-                month = date_str.split('年')[1].split('月')[0].zfill(2)
-                day = date_str.split('月')[1].split('日')[0].zfill(2)
-                numeric_date_str = f"{year}{month}{day}"
-            except (IndexError, ValueError):
-                # 如果解析失败，使用当前日期
-                numeric_date_str = datetime.datetime.now().strftime('%Y%m%d')
-        else:
-            # 假设已经是数字格式或使用当前日期
-            numeric_date_str = date_str if date_str.isdigit() and len(date_str) == 8 else datetime.datetime.now().strftime('%Y%m%d')
-
         if getattr(sys, 'frozen', False):
             base_dir = pathlib.Path(sys.executable).parent
         else:
@@ -1073,7 +1058,7 @@ class Application:
             self.main_window.log_message(f"已保存阅卷记录到: {excel_filename}")
             return excel_filepath
 
-        except PermissionError as e:
+        except PermissionError:
             # 文件被占用，直接报错
             self.main_window.log_message(f"保存阅卷记录失败: Excel文件被占用，请关闭文件后重试。文件路径: {excel_filepath}", True)
             return None
@@ -1082,19 +1067,6 @@ class Application:
             error_detail_full = traceback.format_exc()
             self.main_window.log_message(f"保存阅卷记录失败: {str(e)}\n详细错误:\n{error_detail_full}", True)
             return None
-
-    def start_auto_evaluation(self):
-        """开始自动阅卷"""
-        try:
-            # 检查必要设置
-            if not self.main_window.check_required_settings():
-                return
-
-            self.worker.start()
-        except Exception as e:
-            self.main_window.log_message(f"运行自动阅卷失败: {str(e)}", is_error=True)
-            # 如果启动失败，确保UI状态正确
-            self.main_window.update_ui_state(is_running=False)
 
     def run(self):
         """运行应用程序"""

@@ -4,6 +4,9 @@ import configparser
 import os
 import sys
 import appdirs
+from typing import List, Optional
+
+from ui_schema import load_ui_schema
 
 class ConfigManager:
     """配置管理器,负责保存和加载配置"""
@@ -22,7 +25,10 @@ class ConfigManager:
         self.config_file_path = os.path.join(self.config_dir, "config.ini")
         os.makedirs(self.config_dir, exist_ok=True)
 
-        self.max_questions = 7
+        schema = load_ui_schema()
+        if schema.max_questions < 1:
+            raise RuntimeError("无法从 setting/七题.ui 读取题目数量：" + "；".join(schema.problems))
+        self.max_questions = schema.max_questions  # 题目数量上限由 .ui 里的题目页数量决定
         self._init_default_config()
         self.load_config()
 
@@ -102,7 +108,7 @@ class ConfigManager:
     def _safe_load_config(self):
         """安全地加载配置，缺失项使用默认值"""
 
-        # 兼容旧/错误配置：允许 provider 字段写入 UI 文本（如“火山引擎 (推荐)”），自动映射为内部 provider_id（如 volcengine）。
+        # 兼容旧/错误配置：允许 provider 字段写入 UI 文本（如“火山引擎”），自动映射为内部 provider_id（如 volcengine）。
         self.first_api_provider = self._normalize_ai_provider_value(
             self._get_config_safe('API', 'first_api_provider', "volcengine"),
             default_provider_id="volcengine",
@@ -175,7 +181,7 @@ class ConfigManager:
 
         兼容输入：
         - 内部ID：volcengine / moonshot / ...
-        - UI文本：火山引擎 (推荐) / 月之暗面 / ...
+        - UI文本：火山引擎 / 月之暗面 / ...
         """
         if raw_value is None:
             return default_provider_id
@@ -400,16 +406,82 @@ class ConfigManager:
         """获取指定题目的配置
         
         Args:
-            question_index: 题目索引（1-7）
+            question_index: 题目索引（1..max_questions）
             
         Returns:
             dict: 题目配置字典，如果不存在则返回 {'enabled': False}
         """
         return self.question_configs.get(str(question_index), {'enabled': False})
     
-    def check_required_settings(self):
-        if not self.first_api_key or not self.first_modelID or not self.first_api_provider:
-            return False
-        if self.dual_evaluation_enabled and (not self.second_api_key or not self.second_modelID or not self.second_api_provider):
-            return False
-        return True
+    def dual_evaluation_blocker(self) -> Optional[str]:
+        """双评是否被当前题目设置禁止。返回原因；None 表示允许双评。
+
+        规则：只有“单题 + 没有识评分离(OCR+评分)模式”时才允许双评。
+        """
+        enabled = self.get_enabled_questions()
+        if len(enabled) > 1:
+            return "多题模式下自动禁用双评功能"
+        if any(self.get_question_config(i).get('work_mode') == 'ocr_then_grade' for i in enabled):
+            return "识评分离模式下自动禁用双评功能"
+        return None
+
+    def validate_before_run(self) -> List[str]:
+        """启动阅卷前的唯一校验入口。返回问题清单（空列表表示可以开始）。
+
+        同时把供应商字段归一化为内部ID并写回内存，保证后续保存落盘的是内部ID。
+        """
+        errors: List[str] = []
+
+        def is_valid_pos(pos) -> bool:
+            if not isinstance(pos, (tuple, list)) or len(pos) != 2:
+                return False
+            try:
+                x, y = int(pos[0]), int(pos[1])
+            except (ValueError, TypeError):
+                return False
+            return not (x == 0 and y == 0)
+
+        # 第二组始终必填：单评时也用于故障转移
+        for group, label, suffix in (("first", "第一组", ""), ("second", "第二组", "（用于备用/故障切换）")):
+            provider_id = self._resolve_provider_id(getattr(self, f"{group}_api_provider", ""))
+            if not provider_id:
+                errors.append(f"{label}：请选择一个AI平台（下拉框里选）{suffix}")
+            else:
+                setattr(self, f"{group}_api_provider", provider_id)
+            if not str(getattr(self, f"{group}_api_key", "")).strip():
+                errors.append(f"{label}：密钥不能为空（在平台后台复制粘贴）{suffix}")
+            if not str(getattr(self, f"{group}_modelID", "")).strip():
+                errors.append(f"{label}：模型ID不能为空（例如模型名称/ID）{suffix}")
+
+        enabled = self.get_enabled_questions()
+        if not enabled:
+            errors.append("没有启用任何题目，请至少启用一道题目")
+
+        is_single_q1_run = (enabled == [1])
+        q1_three_step = bool(self.get_question_config(1).get('enable_three_step_scoring', False))
+
+        for q_idx in enabled:
+            q_cfg = self.get_question_config(q_idx)
+            if not str(q_cfg.get('standard_answer', '')).strip():
+                errors.append(f"第{q_idx}题已启用但未设置评分细则")
+            if not q_cfg.get('answer_area'):
+                errors.append(f"第{q_idx}题已启用但未配置答案区域")
+            if not is_valid_pos(q_cfg.get('confirm_button_pos')):
+                errors.append(f"第{q_idx}题已启用但未配置确认按钮坐标")
+
+            if q_idx == 1 and is_single_q1_run and q1_three_step:
+                for step in (1, 2, 3):
+                    if not is_valid_pos(q_cfg.get(f'score_input_pos_step{step}')):
+                        errors.append(f"第一题启用三步打分，但未配置步骤{step}输入坐标")
+            elif not is_valid_pos(q_cfg.get('score_input_pos')):
+                errors.append(f"第{q_idx}题已启用但未配置分数输入坐标")
+
+        return errors
+
+    def _resolve_provider_id(self, value) -> str:
+        """内部ID或界面显示文字 -> 内部ID；无法识别返回空串。"""
+        from api_service import PROVIDER_CONFIGS, get_provider_id_from_ui_text
+        v = str(value or "").strip()
+        if v in PROVIDER_CONFIGS:
+            return v
+        return get_provider_id_from_ui_text(v) or ""

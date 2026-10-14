@@ -1,14 +1,13 @@
 # question_config_dialog.py - 题目配置对话框模块
 
 from typing import Optional, Any
-from PyQt5.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
+from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                             QLineEdit, QPushButton, QCheckBox,
-                            QComboBox, QTextEdit, QSpinBox, QMessageBox,
+                            QComboBox, QSpinBox,
                             QMainWindow, QWidget, QSizePolicy)
 from PyQt5.QtCore import Qt, QPoint, QRect, pyqtSignal, QTimer
 from PyQt5.QtGui import QPainter, QColor, QPen, QFont, QMouseEvent, QPaintEvent, QCloseEvent, QShowEvent
 import pyautogui
-import time
 
 class MyWindow2(QMainWindow):
     """答案框窗口类，用于框定答案区域"""
@@ -148,10 +147,6 @@ class MyWindow2(QMainWindow):
         else:
             text1 = f"此框覆盖第{self.question_index}题学生答案区域" if self.question_index else "请使此框覆盖学生答案"
             text2 = "在配置窗口点击'确认框定'"
-        
-        # 计算文本宽度以便居中显示
-        text1_width = painter.fontMetrics().width(text1)
-        text2_width = painter.fontMetrics().width(text2)
         
         # 绘制文字
         painter.setPen(QColor(255, 0, 0, 255))

@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (QMainWindow, QWidget, QMessageBox, QDialog,
                              QComboBox, QLineEdit, QCheckBox, QSpinBox, QDoubleSpinBox,
                              QPlainTextEdit, QPushButton)
 from PyQt5.QtCore import Qt, pyqtSignal, QEvent, QObject, QTimer
-from PyQt5.QtGui import QFont, QCloseEvent, QIcon, QTextCursor, QTextBlockFormat, QTextCharFormat, QColor
+from PyQt5.QtGui import QFont, QCloseEvent, QIcon, QTextCursor, QTextBlockFormat
 from PyQt5 import uic
 
 # --- 新增导入 ---
@@ -20,8 +20,9 @@ _parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 # 从 api_service.py 导入转换函数和UI文本列表生成函数
-from api_service import get_provider_id_from_ui_text, get_ui_text_from_provider_id, UI_TEXT_TO_PROVIDER_ID, PROVIDER_CONFIGS
+from api_service import get_provider_id_from_ui_text
 from grading_support import classify_teacher_facing_error, TeacherErrorCategory
+from ui_schema import load_ui_schema, ui_file_path, WORK_MODE_IDS, DEFAULT_WORK_MODE
 
 class MainWindow(QMainWindow):
     # 日志级别定义
@@ -33,16 +34,6 @@ class MainWindow(QMainWindow):
     log_signal = pyqtSignal(str, bool, str)  # message, is_error, level
     progress_signal = pyqtSignal(int, int)
     finished_signal = pyqtSignal()
-
-    _WORK_MODE_UI_TO_ID = {
-        'AI识图直评': 'direct_grade',
-        'OCR+评分': 'ocr_then_grade',
-    }
-    _WORK_MODE_ID_TO_DISPLAY = {
-        'direct_grade': '1 AI识图直评',
-        'ocr_then_grade': '2 OCR+评分',
-    }
-
 
     def __init__(self, config_manager, api_service, worker):
         super().__init__()
@@ -58,8 +49,8 @@ class MainWindow(QMainWindow):
             base_path = sys._MEIPASS  # type: ignore
         else:
             base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        ui_path = os.path.join(base_path, "setting", "七题.ui")
-        uic.loadUi(ui_path, self)
+        uic.loadUi(ui_file_path(), self)
+        self._ui_schema = load_ui_schema()
 
         # 设置窗口图标
         try:
@@ -87,7 +78,7 @@ class MainWindow(QMainWindow):
         # 初始化属性
         self.answer_windows = {}
         self.current_question = 1
-        self.max_questions = 7  # 多题模式最多支持7道题
+        self.max_questions = self._ui_schema.max_questions  # 题目数量由 .ui 里的题目页决定
         self._ui_cache = {}
 
         self.init_ui()
@@ -273,7 +264,7 @@ class MainWindow(QMainWindow):
 
         # ==================================================================
         # 成功场景：连接测试通过
-        # 说明：test_api_connection() 成功时会返回类似“火山引擎 (推荐)：连接成功”。
+        # 说明：test_api_connection() 成功时会返回类似“火山引擎：连接成功”。
         # 这里要直接按成功展示，避免被默认分支包装成“操作未成功：...”。
         # ==================================================================
         success_markers = [
@@ -473,12 +464,7 @@ class MainWindow(QMainWindow):
         elif combo_box_name.startswith('work_mode_'):
             q_index = combo_box_name.replace('work_mode_', '')
             combo_box = self.get_ui_element(combo_box_name, QComboBox)
-            work_mode = None
-            if combo_box and isinstance(combo_box, QComboBox):
-                work_mode = combo_box.currentData()
-            if not work_mode:
-                normalized_text = self._normalize_work_mode_ui_text(ui_text)
-                work_mode = self._WORK_MODE_UI_TO_ID.get(normalized_text, 'direct_grade')
+            work_mode = self._work_mode_id_of(combo_box)
             field_name = f"question_{q_index}_work_mode"
             self.config_manager.update_config_in_memory(field_name, work_mode)
             label = self._display_name_for_field(str(field_name))
@@ -611,20 +597,12 @@ class MainWindow(QMainWindow):
 
     def init_ui(self):
         """初始化UI组件和布局
-        
-        重要说明：
-        - first_api_url 和 second_api_url 下拉框只包含AI评分模型提供商
-        """
-        # --- 核心修改: 动态填充 ComboBox，只包含AI评分模型 ---
-        for combo_name in ['first_api_url', 'second_api_url']:
-            combo_box = self.get_ui_element(combo_name, QComboBox)
-            if combo_box and isinstance(combo_box, QComboBox):
-                combo_box.clear()
-                for ui_text, provider_id in UI_TEXT_TO_PROVIDER_ID.items():
-                    combo_box.addItem(ui_text, provider_id)
 
-        # UI文件历史上包含第8题Tab；此处确保运行时只保留7题
-        self._trim_question_tabs_to_max()
+        下拉框的选项、题目数量都来自 .ui（见 ui_schema.py）；这里只给选项绑定内部ID，不再清空重建。
+        """
+        self._bind_combo_item_data()
+        for problem in self._ui_schema.problems:
+            self.log_message(f"界面文件(.ui)检查：{problem}", is_error=True)
 
         # 将选中选项卡设置为高亮背景，便于视觉识别当前小题
         try:
@@ -643,35 +621,30 @@ class MainWindow(QMainWindow):
         self.setup_text_fields()
         self.setup_dual_evaluation()
 
-        # 初始化每题工作模式下拉框
-        for i in range(1, self.max_questions + 1):
-            work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
-            if work_mode_combo and isinstance(work_mode_combo, QComboBox):
-                work_mode_combo.clear()
-                work_mode_combo.addItem("1 AI识图直评", "direct_grade")
-                work_mode_combo.addItem("2 OCR+评分", "ocr_then_grade")
-                work_mode_combo.setToolTip("AI识图直评：AI看图直接评分；OCR+评分：先识别文字，再按文字评分（不支持双评）。两种模式均开启思考。")
-
         self.load_config_to_ui()
         self._connect_signals() # <--- 在这里统一调用
 
         self.log_message("UI组件初始化完成")
 
-    def _trim_question_tabs_to_max(self) -> None:
-        """确保题目Tabs数量不超过 self.max_questions。
+    def _bind_combo_item_data(self) -> None:
+        """给 .ui 里已有的下拉选项绑定内部ID（供应商ID / 工作模式ID）。"""
+        for combo_name in ('first_api_url', 'second_api_url'):
+            combo_box = self.get_ui_element(combo_name, QComboBox)
+            if isinstance(combo_box, QComboBox):
+                for idx in range(combo_box.count()):
+                    combo_box.setItemData(idx, get_provider_id_from_ui_text(combo_box.itemText(idx)))
 
-        这样即使UI文件仍含“第8题”相关控件，运行时也会被移除，用户不可见。
-        """
-        tab_widget = self.get_ui_element('questionTabs')
-        if not tab_widget:
-            return
+        for i in range(1, self.max_questions + 1):
+            combo_box = self.get_ui_element(f'work_mode_{i}', QComboBox)
+            if isinstance(combo_box, QComboBox):
+                for idx in range(min(combo_box.count(), len(WORK_MODE_IDS))):
+                    combo_box.setItemData(idx, WORK_MODE_IDS[idx])
 
-        try:
-            while tab_widget.count() > self.max_questions:
-                tab_widget.removeTab(tab_widget.count() - 1)
-        except Exception:
-            # UI控件异常时保持容错，不阻断主界面启动
-            pass
+    def _work_mode_id_of(self, combo_box) -> str:
+        """读取 work_mode_N 下拉框当前选中的工作模式ID。"""
+        if not isinstance(combo_box, QComboBox):
+            return DEFAULT_WORK_MODE
+        return combo_box.currentData() or self._ui_schema.work_mode_id_at(combo_box.currentIndex())
     
     def load_config_to_ui(self):
         """将配置从ConfigManager加载到UI控件"""
@@ -695,15 +668,7 @@ class MainWindow(QMainWindow):
                 combo_box = self.get_ui_element(combo_name, QComboBox)
                 if combo_box and isinstance(combo_box, QComboBox):
                     index = combo_box.findData(provider_id)
-                    if index >= 0:
-                        combo_box.setCurrentIndex(index)
-                    else:
-                        # 兼容旧配置：尝试通过显示文本定位
-                        ui_text_to_select = get_ui_text_from_provider_id(provider_id)
-                        if ui_text_to_select:
-                            combo_box.setCurrentText(ui_text_to_select)
-                        else:
-                            combo_box.setCurrentIndex(0)
+                    combo_box.setCurrentIndex(index if index >= 0 else 0)
 
             # 加载其他配置
             subject_widget = self.get_ui_element('subject_text', QComboBox)
@@ -754,13 +719,8 @@ class MainWindow(QMainWindow):
                 # 加载每题工作模式
                 work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
                 if work_mode_combo and isinstance(work_mode_combo, QComboBox):
-                    work_mode_value = q_config.get('work_mode', 'direct_grade')
-                    index = work_mode_combo.findData(work_mode_value)
-                    if index >= 0:
-                        work_mode_combo.setCurrentIndex(index)
-                    else:
-                        display_text = self._WORK_MODE_ID_TO_DISPLAY.get(work_mode_value, '1 AI识图直评')
-                        work_mode_combo.setCurrentText(display_text)
+                    index = work_mode_combo.findData(q_config.get('work_mode', DEFAULT_WORK_MODE))
+                    work_mode_combo.setCurrentIndex(index if index >= 0 else 0)
                 
 
             # 加载完成后，应用所有UI约束
@@ -777,7 +737,7 @@ class MainWindow(QMainWindow):
             self.log_message("配置已成功加载到UI并应用约束。")
             self._pending_save = False
             self._config_loaded_once = True
-        except Exception as e:
+        except Exception:
             detail = traceback.format_exc()
             log_path = self._write_debug_log("load_config", detail)
             msg = "读取设置时出错，但不影响打开主界面。\n建议：关闭软件重新打开；如果反复出现，请把 logs 里的日志发给技术人员。"
@@ -789,12 +749,11 @@ class MainWindow(QMainWindow):
 
     def auto_run_but_clicked(self):
         """自动运行按钮点击事件"""
-        # 先做启动前校验（包含：供应商UI文本→内部ID归一化、必要坐标检查等），避免“保存了错误配置”或“启动→秒停”。
+        # 先以界面上用户的实际选择为准同步配置，再做启动前校验
+        # （包含：供应商UI文本→内部ID归一化、必要坐标检查等），避免“保存了错误配置”或“启动→秒停”。
+        self._sync_run_state_from_ui()
         if not self.check_required_settings():
             return
-
-        # 保存前同步工作模式选择
-        self._sync_work_mode_from_ui()
 
         self.log_message("尝试在运行前保存所有配置...")
         if not self._flush_config_to_file("before_run"):
@@ -823,12 +782,12 @@ class MainWindow(QMainWindow):
             "否则：可能保存不了阅卷记录，甚至中途报错。"
         )
         ok_button = msg_box.addButton("我已关闭Excel，开始自动阅卷", QMessageBox.AcceptRole)
-        cancel_button = msg_box.addButton("取消", QMessageBox.RejectRole)
+        msg_box.addButton("取消", QMessageBox.RejectRole)
         msg_box.setDefaultButton(ok_button)
         msg_box.setSizeGripEnabled(True)
         msg_box.setMinimumSize(680, 260)
         msg_box.setStyleSheet("QLabel{min-width: 560px;}")
-        result = msg_box.exec_()
+        msg_box.exec_()
 
         # 检查用户是否点击了"开始自动阅卷"按钮（而不是点击X或取消）
         if msg_box.clickedButton() == ok_button:
@@ -844,58 +803,16 @@ class MainWindow(QMainWindow):
         try:
             # 多题模式：获取所有启用的题目
             enabled_questions_indices = self.config_manager.get_enabled_questions()
-            
-            if not enabled_questions_indices:
-                msg_box = QMessageBox(self)
-                msg_box.setIcon(QMessageBox.Warning)
-                msg_box.setWindowTitle("配置不完整")
-                msg_box.setText("没有启用任何题目。\n\n请至少启用一道题目。")
-                msg_box.setStandardButtons(QMessageBox.Ok)
-                msg_box.exec_()
-                return
 
-            # 检查所有启用题目的答案区域配置
-            missing_configs = []
-            for q_idx in enabled_questions_indices:
-                q_config = self.config_manager.get_question_config(q_idx)
-                if not q_config or 'answer_area' not in q_config or not q_config['answer_area']:
-                    missing_configs.append(f"第{q_idx}题")
-            
-            if missing_configs:
-                msg_box = QMessageBox(self)
-                msg_box.setIcon(QMessageBox.Warning)
-                msg_box.setWindowTitle("配置不完整")
-                msg_box.setText(f"以下题目未配置答案区域：\n{', '.join(missing_configs)}\n\n请在题目配置对话框中设置答案区域坐标。")
-                msg_box.setSizeGripEnabled(True)
-                msg_box.setMinimumSize(500, 150)
-                msg_box.setStyleSheet("QLabel{min-width: 400px;}")
-                msg_box.setStandardButtons(QMessageBox.Ok)
-                msg_box.exec_()
-                return
-
-            # 准备参数给 AutoThread
+            # 多题 / 识评分离模式下双评不可用：统一由 ConfigManager 判定，UI 只负责同步勾选状态
             dual_evaluation = self.config_manager.dual_evaluation_enabled
-            
-            # 多题模式下禁用双评（只有单题时才能双评）
-            if len(enabled_questions_indices) > 1 and dual_evaluation:
+            blocker = self.config_manager.dual_evaluation_blocker() if dual_evaluation else None
+            if blocker:
                 dual_evaluation = False
-                # 更新UI复选框状态，确保UI与实际行为一致
                 dual_eval_checkbox = self.get_ui_element('dual_evaluation_enabled')
                 if dual_eval_checkbox:
                     dual_eval_checkbox.setChecked(False)
-                self.log_message("多题模式下自动禁用双评功能", is_error=False)
-
-            # 识评分离模式下禁用双评
-            if dual_evaluation:
-                for q_idx in enabled_questions_indices:
-                    q_cfg = self.config_manager.get_question_config(q_idx)
-                    if q_cfg.get('work_mode') == 'ocr_then_grade':
-                        dual_evaluation = False
-                        dual_eval_checkbox = self.get_ui_element('dual_evaluation_enabled')
-                        if dual_eval_checkbox:
-                            dual_eval_checkbox.setChecked(False)
-                        self.log_message("识评分离模式下自动禁用双评功能", is_error=False)
-                        break
+                self.log_message(blocker, is_error=False)
 
             question_configs_for_worker = []
             for q_idx in enabled_questions_indices:
@@ -944,86 +861,8 @@ class MainWindow(QMainWindow):
             self._show_message("启动失败", summary, icon=QMessageBox.Critical, detail=detail)
 
     def check_required_settings(self):
-        """检查必要的设置是否已配置"""
-        errors = []
-        def _resolve_provider_to_id(value: str) -> str:
-            v = (value or "").strip()
-            if not v:
-                return ""
-            if v in PROVIDER_CONFIGS:
-                return v
-            mapped = get_provider_id_from_ui_text(v)
-            return mapped or ""
-
-        def _is_valid_pos(pos) -> bool:
-            if not pos:
-                return False
-            if not isinstance(pos, (tuple, list)) or len(pos) != 2:
-                return False
-            try:
-                x, y = int(pos[0]), int(pos[1])
-            except Exception:
-                return False
-            return not (x == 0 and y == 0)
-
-        # --- AI供应商配置：允许用户UI文本，但启动前必须能解析为内部ID ---
-        first_provider_id = _resolve_provider_to_id(getattr(self.config_manager, 'first_api_provider', ''))
-        if not first_provider_id:
-            errors.append("第一组：请选择一个AI平台（下拉框里选）")
-        else:
-            # 写回内存，确保后续保存会落盘为内部ID
-            self.config_manager.update_config_in_memory('first_api_provider', first_provider_id)
-
-        if not self.config_manager.first_api_key.strip():
-            errors.append("第一组：密钥不能为空（在平台后台复制粘贴）")
-        if not self.config_manager.first_modelID.strip():
-            errors.append("第一组：模型ID不能为空（例如模型名称/ID）")
-
-        # 始终要求配置第二组API（用于故障转移）
-        second_provider_id = _resolve_provider_to_id(getattr(self.config_manager, 'second_api_provider', ''))
-        if not second_provider_id:
-            errors.append("第二组：请选择一个AI平台（用于备用/故障切换）")
-        else:
-            self.config_manager.update_config_in_memory('second_api_provider', second_provider_id)
-
-        if not self.config_manager.second_api_key.strip():
-            errors.append("第二组：密钥不能为空（用于备用/故障切换）")
-        if not self.config_manager.second_modelID.strip():
-            errors.append("第二组：模型ID不能为空（用于备用/故障切换）")
-
-        # 检查所有启用的题目的评分细则、答案区域、以及必要坐标（分数输入/确认按钮/三步输入）
-        enabled_questions = self.config_manager.get_enabled_questions()
-
-        is_single_q1_run = (len(enabled_questions) == 1 and enabled_questions[0] == 1)
-        q1_cfg = self.config_manager.get_question_config(1)
-        q1_three_step = bool(q1_cfg.get('enable_three_step_scoring', False))
-
-        for q_idx in enabled_questions:
-            q_cfg = self.config_manager.get_question_config(q_idx)
-            if not q_cfg.get('standard_answer', '').strip():
-                errors.append(f"第{q_idx}题已启用但未设置评分细则")
-            if not q_cfg.get('answer_area'):
-                errors.append(f"第{q_idx}题已启用但未配置答案区域")
-
-            # 坐标校验：减少“启动→秒停”
-            confirm_pos = q_cfg.get('confirm_button_pos')
-            if not _is_valid_pos(confirm_pos):
-                errors.append(f"第{q_idx}题已启用但未配置确认按钮坐标")
-
-            if q_idx == 1 and is_single_q1_run and q1_three_step:
-                p1 = q_cfg.get('score_input_pos_step1')
-                p2 = q_cfg.get('score_input_pos_step2')
-                p3 = q_cfg.get('score_input_pos_step3')
-                if not _is_valid_pos(p1):
-                    errors.append("第一题启用三步打分，但未配置步骤1输入坐标")
-                if not _is_valid_pos(p2):
-                    errors.append("第一题启用三步打分，但未配置步骤2输入坐标")
-                if not _is_valid_pos(p3):
-                    errors.append("第一题启用三步打分，但未配置步骤3输入坐标")
-            else:
-                score_pos = q_cfg.get('score_input_pos')
-                if not _is_valid_pos(score_pos):
-                    errors.append(f"第{q_idx}题已启用但未配置分数输入坐标")
+        """启动前校验：规则统一在 ConfigManager.validate_before_run，这里只负责弹窗提示。"""
+        errors = self.config_manager.validate_before_run()
 
         if errors:
             # --- 优化错误提示 ---
@@ -1138,37 +977,13 @@ class MainWindow(QMainWindow):
         return True
 
     def _apply_ui_constraints(self):
-        is_single_q1_mode = self._is_single_q1_mode()
-
-        has_ocr_then_grade = False
-        try:
-            enabled_questions = self.config_manager.get_enabled_questions()
-            for q_idx in enabled_questions:
-                work_mode_combo = self.get_ui_element(f'work_mode_{q_idx}', QComboBox)
-                if work_mode_combo and isinstance(work_mode_combo, QComboBox):
-                    mode_value = work_mode_combo.currentData()
-                    if not mode_value:
-                        normalized = self._normalize_work_mode_ui_text(work_mode_combo.currentText())
-                        mode_value = self._WORK_MODE_UI_TO_ID.get(normalized, 'direct_grade')
-                    if mode_value == 'ocr_then_grade':
-                        has_ocr_then_grade = True
-                        break
-                else:
-                    q_cfg = self.config_manager.get_question_config(q_idx)
-                    if q_cfg.get('work_mode') == 'ocr_then_grade':
-                        has_ocr_then_grade = True
-                        break
-        except Exception:
-            has_ocr_then_grade = False
-
         dual_eval_checkbox = self.get_ui_element('dual_evaluation_enabled')
         
         # ===========================================================
-        # 双评启用条件
+        # 双评启用条件（规则在 ConfigManager.dual_evaluation_blocker）
         # ===========================================================
         if dual_eval_checkbox:
-            # 双评允许条件：单题模式 + 非识评分离
-            dual_allowed = is_single_q1_mode and not has_ocr_then_grade
+            dual_allowed = self.config_manager.dual_evaluation_blocker() is None
             dual_eval_checkbox.setEnabled(dual_allowed)
             if (not dual_allowed) and dual_eval_checkbox.isChecked():
                 dual_eval_checkbox.blockSignals(True)
@@ -1211,28 +1026,28 @@ class MainWindow(QMainWindow):
         # 更新选项卡标签显示状态
         self._update_tab_titles()
 
+    def _sync_run_state_from_ui(self) -> None:
+        """启动阅卷前，以界面上用户实际的勾选/选择为准，同步回配置内存：
+        双评开关、各题启用状态、各题工作模式。校验和双评限制都基于同步后的配置。"""
+        self._sync_work_mode_from_ui()
+        dual_cb = self.get_ui_element('dual_evaluation_enabled', QCheckBox)
+        if isinstance(dual_cb, QCheckBox):
+            self.config_manager.update_config_in_memory('dual_evaluation_enabled', dual_cb.isChecked())
+        for i in range(2, self.max_questions + 1):
+            enable_cb = self.get_ui_element(f'enableQuestion{i}', QCheckBox)
+            if isinstance(enable_cb, QCheckBox):
+                self.config_manager.update_config_in_memory(f'question_{i}_enabled', enable_cb.isChecked())
+
     def _sync_work_mode_from_ui(self) -> None:
         """将UI中的工作模式同步回配置内存，确保落盘一致。"""
         try:
             for i in range(1, self.max_questions + 1):
                 work_mode_combo = self.get_ui_element(f'work_mode_{i}', QComboBox)
-                if work_mode_combo and isinstance(work_mode_combo, QComboBox):
-                    work_mode = work_mode_combo.currentData()
-                    if not work_mode:
-                        ui_text = self._normalize_work_mode_ui_text(work_mode_combo.currentText())
-                        work_mode = self._WORK_MODE_UI_TO_ID.get(ui_text, 'direct_grade')
+                if isinstance(work_mode_combo, QComboBox):
                     field_name = f'question_{i}_work_mode'
-                    self.config_manager.update_config_in_memory(field_name, work_mode)
+                    self.config_manager.update_config_in_memory(field_name, self._work_mode_id_of(work_mode_combo))
         except Exception:
             pass
-
-    def _normalize_work_mode_ui_text(self, ui_text: str) -> str:
-        """将工作模式下拉框显示文本标准化为核心关键字。"""
-        text = str(ui_text).strip() if ui_text is not None else ""
-        if text and text[0] in "12一二三四五":
-            text = text[1:].strip()
-        text = text.replace(" ", "")
-        return text
     
     def on_question_enabled_changed(self, state):
         if self._is_initializing: return
@@ -1387,7 +1202,6 @@ class MainWindow(QMainWindow):
             'dual_evaluation_enabled', 'score_diff_threshold', 'subject_text',
             'cycle_number', 'wait_time', 'api_test_button'
         ]
-        # 支持7道题
         for i in range(1, self.max_questions + 1):
             config_controls.append(f'configQuestion{i}')
             config_controls.append(f'StandardAnswer_text_{i}')
@@ -1489,7 +1303,6 @@ class MainWindow(QMainWindow):
                 del self.answer_windows[question_index]
 
     def setup_text_fields(self):
-        # 支持7道题
         for i in range(1, self.max_questions + 1):
             widget = self.get_ui_element(f'StandardAnswer_text_{i}')
             if widget: widget.setPlaceholderText(f"请输入第{i}题的评分细则...")
@@ -1526,7 +1339,7 @@ class MainWindow(QMainWindow):
         if test_btn and isinstance(test_btn, QPushButton):
             test_btn.clicked.connect(self.test_api_connections)
         
-        # 支持7道题的配置按钮
+        # 每题的配置按钮
         for i in range(1, self.max_questions + 1):
             btn = self.get_ui_element(f'configQuestion{i}')
             if btn and isinstance(btn, QPushButton):
@@ -1535,7 +1348,7 @@ class MainWindow(QMainWindow):
         # 连接即时保存信号
         self._connect_direct_edit_save_signals()
 
-        # 连接题目启用复选框（支持7道题）
+        # 连接题目启用复选框
         for i in range(2, self.max_questions + 1):
             checkbox = self.get_ui_element(f'enableQuestion{i}')
             if checkbox:

@@ -323,6 +323,9 @@ class GradingThread(QThread):
     def _api_label(api_key: str) -> str:
         return "API 1" if api_key == "first" else "API 2"
 
+    def _api_func(self, api_key: str) -> Callable:
+        return self.api_service.call_first_api if api_key == "first" else self.api_service.call_second_api
+
     def _call_with_failover(self, stage: str, attempt: Callable):
         """两个API交叉重试（起点→另一个→起点→另一个，共4次），全部失败则停止阅卷并请求人工介入。
 
@@ -330,7 +333,6 @@ class GradingThread(QThread):
         成功后 self.current_api 即为实际使用的API。
         返回 (result, response_text, error)。
         """
-        api_funcs = {"first": self.api_service.call_first_api, "second": self.api_service.call_second_api}
         other_of = {"first": "second", "second": "first"}
         stopped_msg = "线程已停止（人工介入或用户取消）"
 
@@ -354,7 +356,7 @@ class GradingThread(QThread):
             self.current_api = api_key
             self.log_signal.emit(f"使用{api_label}进行{stage}...", False, "INFO")
 
-            result, response_text, error = attempt(api_funcs[api_key], api_name, api_key)
+            result, response_text, error = attempt(self._api_func(api_key), api_name, api_key)
             last_response = response_text or last_response
 
             if not self.running:
@@ -405,7 +407,7 @@ class GradingThread(QThread):
         return result, response_text, error
 
     def _grade_with_failover(self, img_str: str, prompt: dict, q_config: dict):
-        """评分（含故障转移，img_str 为空时为纯文本评分）。
+        """单评：带故障转移的评分（img_str 为空时为纯文本评分）。
         返回 ((score, reasoning, itemized_scores, confidence) | None, response_text, error)。"""
         def attempt(fn, name, key):
             score, reasoning, itemized, confidence, response_text, error = self._call_and_process_single_api(
@@ -782,14 +784,12 @@ class GradingThread(QThread):
             self.interrupt_reason = str(reason)
             self.running = False
             
-            # 在锁内发送信号，使用QueuedConnection确保线程安全
-            # Qt会将信号排队到接收线程的事件循环中，避免跨线程直接调用
+            # 跨线程发信号，Qt会自动把它排队到接收线程的事件循环中
             try:
-                from PyQt5.QtCore import Qt
                 self.log_signal.emit(log_msg, True, log_level)
-            except Exception:
-                # 如果信号发送失败，仍然保证状态已正确设置
-                pass
+            except Exception as e:
+                # 状态已设置好，信号发送失败只在控制台留一条记录
+                print(f"[警告] 日志信号发送失败: {e}")
 
     # =========================================================================
     # 统一停止入口
@@ -871,8 +871,8 @@ class GradingThread(QThread):
             if emit_signal and message:
                 try:
                     self.log_signal.emit(message, reason != StopReason.COMPLETED, log_level)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[警告] 停止原因的日志信号发送失败: {e}")
         
         # 在锁外发送特定 UI 信号（避免长时间持有锁）
         if emit_signal:
@@ -903,8 +903,13 @@ class GradingThread(QThread):
                     # 错误信号
                     self.error_signal.emit(message)
                     
-            except Exception:
-                pass  # 信号发送失败不影响状态设置
+            except Exception as e:
+                # 状态已设置好；但提示框信号没发出去意味着老师可能看不到停止原因，必须留下记录
+                print(f"[严重错误] 停止原因({reason})的界面信号发送失败，老师可能看不到提示: {e}")
+                try:
+                    self.log_signal.emit(f"停止提示发送失败（原因：{message}）: {e}", True, "ERROR")
+                except Exception:
+                    pass
 
     def _decode_base64_image(self, img_str: Optional[str]):
         """将截图时保存的base64字符串还原为灰度PIL图像，用于卡页比对。"""
@@ -1335,8 +1340,9 @@ class GradingThread(QThread):
             # 在锁内发送信号，确保状态和信号的原子性
             try:
                 self.log_signal.emit(log_msg, True, log_level)
-            except Exception:
-                pass  # 如果信号发送失败，仍然保证状态已正确设置
+            except Exception as e:
+                # 状态已设置好，信号发送失败只在控制台留一条记录
+                print(f"[警告] 日志信号发送失败: {e}")
         
         # 网络错误提供重试建议（不再自动重试，等待人工判断是否重新开始）
         if isinstance(classified_error, NetworkError) and strategy['should_retry']:
@@ -1688,7 +1694,7 @@ class GradingThread(QThread):
                         screenshot.close()
                         screenshot = None
 
-            except Exception as e:
+            except Exception:
                 # 异常处理中也要确保清理资源
                 if screenshot:
                     try:
@@ -1734,9 +1740,16 @@ class GradingThread(QThread):
         score2 = reasoning2 = scores2 = confidence2 = response_text2 = None
         error1 = error2 = None
 
-        # 单评模式：使用当前API，失败时自动切换
+        # 单评模式：使用当前API，失败时自动切换；成功后交替使用另一个API以降低限流风险
         if not dual_evaluation:
-            return self._evaluate_with_failover(img_str, prompt, current_question_config)
+            result, response_text, error = self._grade_with_failover(img_str, prompt, current_question_config)
+            if error or result is None:
+                return None, error, None, None, response_text
+
+            other_api = "second" if self.current_api == "first" else "first"
+            self.log_signal.emit(f"下一张将使用 API {1 if other_api == 'first' else 2} 评分（交替策略）", False, "DETAIL")
+            self.current_api = other_api
+            return (*result, response_text)
 
         # 双评模式：保持原有逻辑
         # 双评：决定是否并发
@@ -1748,9 +1761,8 @@ class GradingThread(QThread):
         providers_same = bool(first_provider and second_provider and str(first_provider) == str(second_provider))
 
         def _call_api(api_key: str):
-            api_func = self.api_service.call_first_api if api_key == "first" else self.api_service.call_second_api
             return self._call_and_process_single_api(
-                api_func, img_str, prompt, current_question_config,
+                self._api_func(api_key), img_str, prompt, current_question_config,
                 api_name=f"{self._api_label(api_key)}(评分)", api_key=api_key
             )
 
@@ -1810,23 +1822,9 @@ class GradingThread(QThread):
         combined_raw_response = f"API 1:\n{response_text1}\n\nAPI 2:\n{response_text2}"
         return final_score, combined_reasoning, combined_scores, combined_confidence, combined_raw_response
 
-    def _evaluate_with_failover(self, img_str, prompt, current_question_config):
-        """单评：带故障转移的评分，成功后交替使用另一个API以降低限流风险。
-
-        返回格式与 evaluate_answer 相同。
+    def _call_and_process_single_api(self, api_call_func, img_str, prompt, q_config, api_name="API", api_key: Optional[str] = None):
         """
-        result, response_text, error = self._grade_with_failover(img_str, prompt, current_question_config)
-        if error or result is None:
-            return None, error, None, None, response_text
-
-        other_api = "second" if self.current_api == "first" else "first"
-        self.log_signal.emit(f"下一张将使用 API {1 if other_api == 'first' else 2} 评分（交替策略）", False, "DETAIL")
-        self.current_api = other_api
-        return (*result, response_text)
-
-    def _call_and_process_single_api(self, api_call_func, img_str, prompt, q_config, api_name="API", max_retries=2, api_key: Optional[str] = None):
-        """
-        调用指定的API函数，并处理其响应。使用统一重试机制（最多重试1次），节省token和调用次数。
+        调用指定的API函数并处理其响应（单次调用，不内部重试；交叉重试由 _call_with_failover 统一管理）。
 
         Args:
             api_call_func: 要调用的API服务方法 (e.g., self.api_service.call_first_api)
@@ -1834,7 +1832,7 @@ class GradingThread(QThread):
             prompt: 提示词
             q_config: 当前题目配置
             api_name: 用于日志的API名称
-            max_retries: 最大重试次数（已废弃，统一为1）
+            api_key: "first" / "second"，用于成功/失败计数
 
         Returns:
             一个元组 (score, reasoning, itemized_scores, confidence, response_text, error_message)
@@ -2314,27 +2312,21 @@ class GradingThread(QThread):
         1. 检查 scoring_basis（最关键，优先级最高）
         2. 检查 student_answer_summary（其次）
         """
-        try:
-            if isinstance(scoring_basis, str):
-                s_trim = scoring_basis.strip()
-                # 支持英文冒号和中文冒号
-                if (s_trim.startswith('需人工介入:') or s_trim.startswith('需人工介入：') or
-                    s_trim.startswith('需要人工介入:') or s_trim.startswith('需要人工介入：')):
-                    self.log_signal.emit(f"人工介入触发（scoring_basis显式前缀）：{s_trim[:80]}", True, "WARNING")
-                    return '需人工介入'
-        except Exception:
-            pass
+        if isinstance(scoring_basis, str):
+            s_trim = scoring_basis.strip()
+            # 支持英文冒号和中文冒号
+            if (s_trim.startswith('需人工介入:') or s_trim.startswith('需人工介入：') or
+                s_trim.startswith('需要人工介入:') or s_trim.startswith('需要人工介入：')):
+                self.log_signal.emit(f"人工介入触发（scoring_basis显式前缀）：{s_trim[:80]}", True, "WARNING")
+                return '需人工介入'
 
-        try:
-            if isinstance(student_answer_summary, str):
-                s_trim = student_answer_summary.strip()
-                # 支持英文冒号和中文冒号
-                if (s_trim.startswith('需人工介入:') or s_trim.startswith('需人工介入：') or
-                    s_trim.startswith('需要人工介入:') or s_trim.startswith('需要人工介入：')):
-                    self.log_signal.emit(f"人工介入触发（答案摘要显式前缀）：{s_trim[:80]}", True, "WARNING")
-                    return '需人工介入 (答案摘要)'
-        except Exception:
-            pass
+        if isinstance(student_answer_summary, str):
+            s_trim = student_answer_summary.strip()
+            # 支持英文冒号和中文冒号
+            if (s_trim.startswith('需人工介入:') or s_trim.startswith('需人工介入：') or
+                s_trim.startswith('需要人工介入:') or s_trim.startswith('需要人工介入：')):
+                self.log_signal.emit(f"人工介入触发（答案摘要显式前缀）：{s_trim[:80]}", True, "WARNING")
+                return '需人工介入 (答案摘要)'
 
         return None
 
@@ -2466,7 +2458,7 @@ class GradingThread(QThread):
                         return fixed_text
                     except json.JSONDecodeError:
                         pass
-            except Exception:
+            except (UnicodeError, re.error):
                 pass
 
             # 最后尝试：暴力清理所有非ASCII字符外的常见问题
@@ -2481,10 +2473,8 @@ class GradingThread(QThread):
                         return cleaned
                     except json.JSONDecodeError:
                         pass
-            except Exception:
+            except re.error:
                 pass
-
-            return None
         except Exception:
             return None
 
@@ -2709,7 +2699,7 @@ class GradingThread(QThread):
                     'raw_ai_response': parse_info.get('raw_response', 'AI未提供'),
                     'sub_scores': "AI未提供",
                 })
-                self.log_signal.emit(f"记录结果时检测到解析错误（显式模式），已保存原始AI响应", True, "ERROR")
+                self.log_signal.emit("记录结果时检测到解析错误（显式模式），已保存原始AI响应", True, "ERROR")
             elif isinstance(reasoning_data, tuple) and len(reasoning_data) == 2:
                 # 单评成功模式
                 summary, basis = reasoning_data

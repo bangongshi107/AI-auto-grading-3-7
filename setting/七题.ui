@@ -325,7 +325,7 @@ QScrollBar::sub-line:horizontal {
             </property>
             <item>
              <property name="text">
-              <string>火山引擎 (推荐)</string>
+              <string>火山引擎</string>
              </property>
             </item>
             <item>
@@ -340,6 +340,11 @@ QScrollBar::sub-line:horizontal {
             </item>
             <item>
              <property name="text">
+              <string>DeepSeek</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
               <string>阿里通义千问</string>
              </property>
             </item>
@@ -350,17 +355,12 @@ QScrollBar::sub-line:horizontal {
             </item>
             <item>
              <property name="text">
-              <string>腾讯混元</string>
+              <string>ChatGPT (OpenAI)</string>
              </property>
             </item>
             <item>
              <property name="text">
               <string>OpenRouter</string>
-             </property>
-            </item>
-            <item>
-             <property name="text">
-              <string>OpenAI</string>
              </property>
             </item>
             <item>
@@ -509,7 +509,7 @@ QScrollBar::sub-line:horizontal {
             </property>
             <item>
              <property name="text">
-              <string>火山引擎 (推荐)</string>
+              <string>火山引擎</string>
              </property>
             </item>
             <item>
@@ -524,6 +524,11 @@ QScrollBar::sub-line:horizontal {
             </item>
             <item>
              <property name="text">
+              <string>DeepSeek</string>
+             </property>
+            </item>
+            <item>
+             <property name="text">
               <string>阿里通义千问</string>
              </property>
             </item>
@@ -534,17 +539,12 @@ QScrollBar::sub-line:horizontal {
             </item>
             <item>
              <property name="text">
-              <string>腾讯混元</string>
+              <string>ChatGPT (OpenAI)</string>
              </property>
             </item>
             <item>
              <property name="text">
               <string>OpenRouter</string>
-             </property>
-            </item>
-            <item>
-             <property name="text">
-              <string>OpenAI</string>
              </property>
             </item>
             <item>
@@ -657,7 +657,7 @@ QScrollBar::sub-line:horizontal {
                  </size>
                 </property>
                 <property name="toolTip">
-                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
+                 <string>AI识图直评：AI看图直接评分；OCR+评分：先识别文字，再按文字评分（不支持双评）。两种模式均开启思考。</string>
                 </property>
                 <property name="styleSheet">
                  <string notr="true">QComboBox {
@@ -821,7 +821,7 @@ QScrollBar::sub-line:horizontal {
                  </size>
                 </property>
                 <property name="toolTip">
-                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
+                 <string>AI识图直评：AI看图直接评分；OCR+评分：先识别文字，再按文字评分（不支持双评）。两种模式均开启思考。</string>
                 </property>
                 <property name="styleSheet">
                  <string notr="true">QComboBox {
@@ -835,27 +835,12 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <item>
                  <property name="text">
-                  <string>一 识图直评</string>
+                  <string>1 AI识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                  <string>二 直评+推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>三 识评分离</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>四 分离+单推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>五 分离+双推理</string>
+                  <string>2 OCR+评分</string>
                  </property>
                 </item>
                </widget>
@@ -974,7 +959,7 @@ QScrollBar::sub-line:horizontal {
                  </size>
                 </property>
                 <property name="toolTip">
-                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
+                 <string>AI识图直评：AI看图直接评分；OCR+评分：先识别文字，再按文字评分（不支持双评）。两种模式均开启思考。</string>
                 </property>
                 <property name="styleSheet">
                  <string notr="true">QComboBox {
@@ -988,27 +973,12 @@ QScrollBar::sub-line:horizontal {
                 </property>
                 <item>
                  <property name="text">
-                  <string>一 识图直评</string>
+                  <string>1 AI识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                  <string>二 直评+推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>三 识评分离</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>四 分离+单推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>五 分离+双推理</string>
+                  <string>2 OCR+评分</string>
                  </property>
                 </item>
                </widget>
@@ -1127,31 +1097,16 @@ QScrollBar::sub-line:horizontal {
                  </size>
                 </property>
                 <property name="toolTip">
-                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
+                 <string>AI识图直评：AI看图直接评分；OCR+评分：先识别文字，再按文字评分（不支持双评）。两种模式均开启思考。</string>
                 </property>
                 <item>
                  <property name="text">
-                  <string>一 识图直评</string>
+                  <string>1 AI识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                  <string>二 直评+推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>三 识评分离</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>四 分离+单推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>五 分离+双推理</string>
+                  <string>2 OCR+评分</string>
                  </property>
                 </item>
                </widget>
@@ -1270,31 +1225,16 @@ QScrollBar::sub-line:horizontal {
                  </size>
                 </property>
                 <property name="toolTip">
-                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
+                 <string>AI识图直评：AI看图直接评分；OCR+评分：先识别文字，再按文字评分（不支持双评）。两种模式均开启思考。</string>
                 </property>
                 <item>
                  <property name="text">
-                  <string>一 识图直评</string>
+                  <string>1 AI识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                  <string>二 直评+推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>三 识评分离</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>四 分离+单推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>五 分离+双推理</string>
+                  <string>2 OCR+评分</string>
                  </property>
                 </item>
                </widget>
@@ -1413,31 +1353,16 @@ QScrollBar::sub-line:horizontal {
                  </size>
                 </property>
                 <property name="toolTip">
-                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
+                 <string>AI识图直评：AI看图直接评分；OCR+评分：先识别文字，再按文字评分（不支持双评）。两种模式均开启思考。</string>
                 </property>
                 <item>
                  <property name="text">
-                  <string>一 识图直评</string>
+                  <string>1 AI识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                  <string>二 直评+推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>三 识评分离</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>四 分离+单推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>五 分离+双推理</string>
+                  <string>2 OCR+评分</string>
                  </property>
                 </item>
                </widget>
@@ -1556,31 +1481,16 @@ QScrollBar::sub-line:horizontal {
                  </size>
                 </property>
                 <property name="toolTip">
-                 <string>识图直评：AI看图直接评分；直评+推理：看图评分并开启推理；识评分离：AI1识别文字，AI2评分；分离+推理：识别不推理、评分开启推理；分离+双推理：识别与评分均开启推理</string>
+                 <string>AI识图直评：AI看图直接评分；OCR+评分：先识别文字，再按文字评分（不支持双评）。两种模式均开启思考。</string>
                 </property>
                 <item>
                  <property name="text">
-                  <string>一 识图直评</string>
+                  <string>1 AI识图直评</string>
                  </property>
                 </item>
                 <item>
                  <property name="text">
-                  <string>二 直评+推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>三 识评分离</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>四 分离+单推理</string>
-                 </property>
-                </item>
-                <item>
-                 <property name="text">
-                  <string>五 分离+双推理</string>
+                  <string>2 OCR+评分</string>
                  </property>
                 </item>
                </widget>
