@@ -505,7 +505,9 @@ class ApiService:
     # ==========================================================================
     def _build_chat_messages(self, img_str, prompt, detail=None):
         """构造 OpenAI 风格的 messages。prompt 可为字符串或 {system,user} 结构。
-        核心原则: 图片在前，文本在后，以保证最大兼容性。"""
+        核心原则: 文本在前、图片在后。图片每份卷子都不同，放在最后才能让 system + 固定文本
+        （题型提示/评分细则等）成为相同前缀，命中 OpenAI/DeepSeek 等的自动前缀缓存。
+        项目约定: 程序使用的所有模型均支持图片输入，无需再做兼容性假设。"""
         system_text = ""
         user_text = ""
         if isinstance(prompt, dict):
@@ -528,8 +530,8 @@ class ApiService:
         messages.append({
             "role": "user",
             "content": [
+                {"type": "text", "text": user_text},
                 {"type": "image_url", "image_url": image_url},
-                {"type": "text", "text": user_text}
             ]
         })
         return messages

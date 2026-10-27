@@ -82,7 +82,7 @@ def test_deepseek_payload_keeps_thinking_on_with_default_effort(api):
     assert "reasoning_effort" not in payload
     assert payload["max_tokens"] == REASONING_MAX_OUTPUT_TOKENS
     content = payload["messages"][-1]["content"]
-    assert content[0]["type"] == "image_url" and content[1]["type"] == "text"
+    assert content[0]["type"] == "text" and content[1]["type"] == "image_url"
     assert payload["messages"][0] == {"role": "system", "content": "S"}
 
 
@@ -91,19 +91,19 @@ def test_openai_payload_uses_max_completion_tokens(api):
     assert "max_tokens" not in payload
     assert payload["max_completion_tokens"] == REASONING_MAX_OUTPUT_TOKENS
     assert "reasoning_effort" not in payload
-    assert payload["messages"][-1]["content"][0]["image_url"]["detail"] == "high"
+    assert payload["messages"][-1]["content"][-1]["image_url"]["detail"] == "high"
 
 
 def test_deepseek_payload_does_not_send_detail(api):
     payload = api._build_deepseek_payload("deepseek-flash", IMG, PROMPT)
-    assert "detail" not in payload["messages"][-1]["content"][0]["image_url"]
+    assert "detail" not in payload["messages"][-1]["content"][-1]["image_url"]
 
 
 def test_volcengine_payload_unchanged_semantics(api):
     payload = api._build_volcengine_payload("doubao", IMG, PROMPT)
     assert payload["thinking"] == {"type": "enabled"}
     assert payload["max_tokens"] == 8192
-    assert payload["messages"][-1]["content"][0]["image_url"]["detail"] == "high"
+    assert payload["messages"][-1]["content"][-1]["image_url"]["detail"] == "high"
     text_only = api._build_volcengine_payload("doubao", "", "hi")
     assert text_only["messages"] == [{"role": "user", "content": "hi"}]
 

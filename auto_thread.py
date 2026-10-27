@@ -84,7 +84,7 @@ class GradingThread(QThread):
         # 连续 ZERO_SCORE_STREAK_THRESHOLD 份卷子的全部题目均为0分时立即停止，
         # 不做任何自动纠正，等待人工核查最近几份试卷。
         # =================================================================
-        self.ZERO_SCORE_STREAK_THRESHOLD = 4
+        self.ZERO_SCORE_STREAK_THRESHOLD = 20
         self._consecutive_zero_streak = 0  # 连续"全部题目均为0分"的卷子数
         self._current_cycle_zero_flags = []  # 本轮(本份卷子)各题得分是否为0
 
@@ -200,9 +200,9 @@ class GradingThread(QThread):
 
     # 仅识图直评的整体评估题要求输出字数（OCR+评分模式下由文本推算，不要求）
     _WORD_COUNT_HINT = (
-        "【字数要求（必须执行）】\n"
-        "- 必须输出 word_count 与 word_count_confidence（high/medium/low）。\n"
-        "- 若无法可靠估计字数：word_count 填 null，word_count_confidence 置为 low。\n\n"
+        "【字数要求】\n"
+        "- 请输出 word_count 与 word_count_confidence（high/medium/low）作为粗略估计。\n"
+        "- 字数仅作粗略把握：无法可靠估计时 word_count 填 null、word_count_confidence 置为 low，且不得因字数不确定而扣字数分，按内容正常评分。\n\n"
         "【输出格式】\n"
         "只输出JSON对象（不要代码块/解释），必须包含以下键：\n"
         "student_answer_summary, scoring_basis, itemized_scores, word_count, word_count_confidence\n\n"
@@ -239,11 +239,13 @@ class GradingThread(QThread):
             source_desc="学生答案文本" if is_text_mode else "图片内容"
         )
         user_prompt = self._QUESTION_TYPE_HINTS.get(question_type) or self._QUESTION_TYPE_HINTS["Subjective_PointBased_QA"]
-        if is_text_mode:
-            user_prompt += f"【学生答案文本】\n{student_text}\n\n"
-        elif is_holistic:
+        # 为命中提示词缓存：同一题内不变的内容（system、题型提示、评分细则）必须放在最前，
+        # 每份卷子都变化的内容（学生答案文本；识图模式下的图片由 api_service 追加在最后）放在最后。
+        if not is_text_mode and is_holistic:
             user_prompt += self._WORD_COUNT_HINT
         user_prompt += f"【评分细则】\n{standard_answer.strip()}\n"
+        if is_text_mode:
+            user_prompt += f"\n【学生答案文本】\n{student_text}\n"
         return {"system": system_message, "user": user_prompt}
 
     def _build_ocr_prompt(self) -> dict:
@@ -2014,32 +2016,12 @@ class GradingThread(QThread):
                 self.log_signal.emit(error_msg, True, "ERROR")
                 return False, error_msg
 
-            if is_holistic_direct:
-                missing_word_fields = [
-                    field for field in ["word_count", "word_count_confidence"] if field not in data
-                ]
-                if missing_word_fields:
-                    message = f"整体评估开放题缺少字数字段: {', '.join(missing_word_fields)}"
-                    self._stop_grading(
-                        reason=StopReason.MANUAL_INTERVENTION,
-                        message=message,
-                        detail="请人工核对字数后评分",
-                        emit_signal=True,
-                        log_level="WARNING"
-                    )
-                    return False, {
-                        'manual_intervention': True,
-                        'message': message,
-                        'raw_feedback': data.get("student_answer_summary", ""),
-                        'already_logged': True
-                    }
-
             student_answer_summary = data.get("student_answer_summary", "")
             scoring_basis = data.get("scoring_basis", "未能提取评分依据")
             itemized_scores_from_json = data.get("itemized_scores")
             confidence_data = {}  # 置信度功能暂时停用
 
-            # 整体评估开放题：字数信息强校验
+            # 整体评估开放题：字数仅作粗略估算并记录，缺失/低可信度均不拦截
             if is_holistic_direct:
                 word_count_raw = data.get("word_count", None)
                 word_count = None
@@ -2059,40 +2041,10 @@ class GradingThread(QThread):
                 if word_count_confidence not in {"high", "medium", "low"}:
                     word_count_confidence = None
 
-                if word_count is None or not word_count_confidence:
-                    message = "字数信息缺失或格式错误，需人工处理"
-                    self._stop_grading(
-                        reason=StopReason.MANUAL_INTERVENTION,
-                        message=message,
-                        detail=f"word_count={word_count_raw}, word_count_confidence={word_conf_raw}",
-                        emit_signal=True,
-                        log_level="WARNING"
-                    )
-                    return False, {
-                        'manual_intervention': True,
-                        'message': message,
-                        'raw_feedback': student_answer_summary,
-                        'already_logged': True
-                    }
-
-                if word_count_confidence == "low":
-                    message = "字数可信度低，需人工复核"
-                    self._stop_grading(
-                        reason=StopReason.MANUAL_INTERVENTION,
-                        message=message,
-                        detail=f"word_count={word_count}",
-                        emit_signal=True,
-                        log_level="WARNING"
-                    )
-                    return False, {
-                        'manual_intervention': True,
-                        'message': message,
-                        'raw_feedback': student_answer_summary,
-                        'already_logged': True
-                    }
-
-                confidence_data["word_count"] = word_count
-                confidence_data["word_count_confidence"] = word_count_confidence
+                if word_count is not None:
+                    confidence_data["word_count"] = word_count
+                if word_count_confidence:
+                    confidence_data["word_count_confidence"] = word_count_confidence
 
             # =====================================================================
             # 【方案A】基于关键词检测的决策逻辑（默认使用，已验证稳定）
